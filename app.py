@@ -111,7 +111,7 @@ with tab_cmp:
     summary = summary[summary["policy"] != "Expected value"].reset_index(drop=True)
     bands = bands[bands["policy"] != "Expected value"]
     base_aov = summary["AOV_base"].iloc[0]
-    
+
     st.subheader("② What each model adds")
     best_aov = summary.loc[summary["AOV_uplift_pct"].idxmax()]
     best_rev = summary.loc[summary["RPS_uplift_pct"].idxmax()]
@@ -135,27 +135,23 @@ with tab_cmp:
         "Average order with suggestions": summary["AOV_policy"],
         "Added to order (so'm)": summary["extra_per_order"],
         "Added to order (%)": summary["AOV_uplift_pct"],
-        "Real revenue change (%)": summary["RPS_uplift_pct"],
-        "± (%)": summary["RPS_uplift_pct_ci95"],
         "Suggestions accepted (%)": 100 * summary["conversion"],
         "Orders completed (%)": 100 * summary["finish_rate"],
         "Value per suggestion (so'm)": summary["value_per_suggestion"]})
     money = lambda v: f"{v:,.0f}".replace(",", " ")  # noqa: E731
     sty = (tbl.style.format({"Average order with suggestions": money, "Added to order (so'm)": money,
                              "Value per suggestion (so'm)": money, "Added to order (%)": "{:+.1f}%",
-                             "Real revenue change (%)": "{:+.1f}%", "± (%)": "{:.1f}",
                              "Suggestions accepted (%)": "{:.1f}%", "Orders completed (%)": "{:.1f}%"})
-           .highlight_max(subset=["Added to order (so'm)", "Added to order (%)", "Real revenue change (%)",
+           .highlight_max(subset=["Added to order (so'm)", "Added to order (%)",
                                   "Value per suggestion (so'm)"],
                           props="background-color:#1b7f3b;color:#ffffff;font-weight:600"))
     st.dataframe(sty, hide_index=True, use_container_width=True)
     st.caption("**Added to order** = how much larger the average *finished* order gets. "
-               "**Real revenue change** = money per *started* order, including shoppers who left - "
                "the true business result. **Value per suggestion** = money kept in carts ÷ suggestions shown. "
                "Green = best in column. Random shows how much is just noise.")
     st.download_button("Download table (CSV)", summary.to_csv(index=False), "model_comparison.csv")
 
-    chart = tbl.set_index("Model")[["Added to order (%)", "Real revenue change (%)"]]
+    chart = tbl.set_index("Model")[["Added to order (%)"]]
     st.bar_chart(chart, y_label="% change vs no suggestions")
     st.caption("The gap between the two bars is shoppers who stopped because of price.")
 

@@ -311,14 +311,26 @@ class ContextBuilder:
 class LinUCBPolicy:
     """Disjoint LinUCB. Arm = product, reward = accepted x price (scaled).
     Cold start begins knowing nothing; warm start is pre-trained on past orders first."""
-    blurb = "Learns what shoppers accept while running."
+    
+    blurb = "Learns what shoppers accept while running."  # Default fallback class attribute
 
     def __init__(self, cat: Catalog, arms, ctxb: ContextBuilder, alpha=0.1, l2=1.0,
-                 name="Contextual bandit (cold start)", warm_start=False):
+                 name=None, warm_start=False):
         self.cat, self.arms, self.ctxb = cat, np.asarray(arms), ctxb
         self.arm_pos = {int(a): i for i, a in enumerate(self.arms)}
-        self.alpha, self.l2, self.name, self.warm_start = alpha, l2, name, warm_start
+        self.alpha, self.l2, self.warm_start = alpha, l2, warm_start
         self.cap = float(np.percentile(cat.prices, 95))
+
+        # Assign specific blurb based on warm_start status
+        if self.warm_start:
+            self.blurb = "Pre-trained on historical orders; adapts online to shopper feedback."
+            default_name = "Contextual bandit (warm start)"
+        else:
+            self.blurb = "Starts with zero historical data; learns what shoppers accept online."
+            default_name = "Contextual bandit (cold start)"
+
+        self.name = name if name is not None else default_name
+
         self.reset()
 
     def reset(self, seed: int = 0):
