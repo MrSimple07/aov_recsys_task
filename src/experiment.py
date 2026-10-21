@@ -1,73 +1,43 @@
-"""Train the three models once, then evaluate all policies under a SimConfig."""
+"""Glue between saved artifacts and the simulator (shared by the CLI and the app)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-import numpy as np
-import pandas as pd
-
+from .artifacts import Bundle
 from .config import SimConfig
-from .data import Dataset
-from .features import ContextBuilder, fit_item_embeddings
-from .models import (AssociationRulesPolicy, LinUCBPolicy, MarkovPolicy,
-                     PopularityPolicy, RandomPolicy, popularity_order)
-from .simulator import build_sessions, run_policy, summarize
+from .models import (ExpectedValuePolicy, FixedListPolicy, FrequentlyBoughtTogether, LinUCBPolicy,
+                     RandomPolicy, SequentialPolicy)
+from .simulator import _subsample, build_sessions, calibrate_stop_slope, evaluate
+
+REFERENCE = "Association rules"    # the stop-after-accept slope is calibrated on this policy
 
 
-@dataclass
-class Prepared:
-    ds: Dataset
-    ctxb: ContextBuilder
-    pop_order: np.ndarray
-    ar: AssociationRulesPolicy
-    seq: MarkovPolicy
-    arms: np.ndarray
+def make_policies(b: Bundle, cfg: SimConfig, fixed_items=None) -> list:
+    """All models, in the order they appear in the comparison table."""
+    cat = b.cat
+    arms = cat.pop_order[:100]
+    return [
+        RandomPolicy(cat),
+        FixedListPolicy(cat, fixed_items),
+        FrequentlyBoughtTogether(cat, b.rules),
+        SequentialPolicy(cat, b.seq),
+        LinUCBPolicy(cat, arms, b.ctxb, name="Contextual bandit (cold start)"),
+        LinUCBPolicy(cat, arms, b.ctxb, name="Contextual bandit (warm start)", warm_start=True),
+        ExpectedValuePolicy(cat, b.rules, p_hit=cfg.p_hit, s=cfg.price_sensitivity,
+                            remove_hit=cfg.remove_hit, remove_miss=cfg.remove_miss,
+                            finish_base=cfg.finish_base),
+    ]
 
 
-def prepare(ds: Dataset, min_support=0.005, min_confidence=0.1, n_arms=100, emb_dim=16) -> Prepared:
-    pop = popularity_order(ds.train, ds.V)
-    ctxb = ContextBuilder(fit_item_embeddings(ds.train, ds.V, emb_dim), ds.prices)
-    ar = AssociationRulesPolicy(ds.prices, pop, min_support, min_confidence).fit(ds.train, ds.V)
-    seq = MarkovPolicy(ds.prices, pop).fit(ds.train, ds.V)
-    print(f"[prepare] vocab={ds.V} train_baskets={len(ds.train)} test_baskets={len(ds.test)} "
-          f"rules={ar.n_rules}")
-    return Prepared(ds, ctxb, pop, ar, seq, pop[:n_arms])
+def run_simulation(b: Bundle, cfg: SimConfig, seeds: int = 3, max_orders: int = 3000,
+                   fixed_items=None, max_warm: int = 3000):
+    pols = make_policies(b, cfg, fixed_items)
+    ref = next(p for p in pols if p.name == REFERENCE)
+    return evaluate(b.cat, b.test, pols, cfg, ref, seeds=seeds, max_orders=max_orders,
+                    ctxb=b.ctxb, warm=b.warm, max_warm=max_warm)
 
 
-def _subsample(items, cap):
-    if len(items) <= cap:
-        return items
-    idx = np.linspace(0, len(items) - 1, cap).astype(int)  # keeps chronological order
-    return [items[i] for i in idx]
-
-
-def evaluate(prep: Prepared, cfg: SimConfig, seeds=5, alpha=0.1, max_test=10000, max_warm=20000):
-    """Returns (per-seed metrics DataFrame, {policy: [added-value arrays per seed]})."""
-    ds, rows, curves = prep.ds, [], {}
-    test_b = _subsample(ds.test, max_test)
-    warm_b = _subsample(ds.train, max_warm)
-    for seed in range(seeds):
-        rng = np.random.default_rng(seed)
-        test = build_sessions(test_b, prep.ctxb, ds.prices, cfg, rng)
-        warm = build_sessions(warm_b, prep.ctxb, ds.prices, cfg, np.random.default_rng(10_000 + seed))
-
-        cold = LinUCBPolicy(prep.arms, ds.prices, prep.ctxb.dim, alpha, name="LinUCB (cold start)")
-        warmed = LinUCBPolicy(prep.arms, ds.prices, prep.ctxb.dim, alpha, name="LinUCB (warm start)")
-        run_policy(warmed, warm, ds.prices, cfg, learn=True)  # offline pre-training in the simulator
-
-        policies = [RandomPolicy(ds.V, seed), PopularityPolicy(prep.pop_order),
-                    prep.ar, prep.seq, cold, warmed]
-        for pol in policies:
-            res = run_policy(pol, test, ds.prices, cfg, learn=True)
-            rows.append({"policy": pol.name, "seed": seed, **summarize(res)})
-            curves.setdefault(pol.name, []).append(res["added"])
-    return pd.DataFrame(rows), curves
-
-
-def aggregate(df: pd.DataFrame) -> pd.DataFrame:
-    g = df.drop(columns="seed").groupby("policy", sort=False)
-    mean, std = g.mean(), g.std(ddof=1).fillna(0)
-    n = df["seed"].nunique()
-    out = mean.copy()
-    out["uplift_pct_ci95"] = 1.96 * std["uplift_pct"] / np.sqrt(n)
-    return out.reset_index()
+def estimate_stop_slope(b: Bundle, cfg: SimConfig, n: int = 500, seed: int = 0) -> float:
+    """Quick calibration used by the live cart view so it matches the simulation."""
+    pols = make_policies(b, cfg)
+    ref = next(p for p in pols if p.name == REFERENCE)
+    sess = build_sessions(_subsample(b.test, n), b.cat.prices, cfg, seed, b.ctxb)
+    return calibrate_stop_slope(sess, ref, b.cat, cfg)

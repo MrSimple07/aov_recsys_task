@@ -1,205 +1,234 @@
-"""Streamlit app:  streamlit run app.py"""
+"""AOV recommender lab - which model raises the order value?   Run:  streamlit run app.py"""
 import os
+import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.config import SimConfig
-from src.data import load_dataset
-from src.experiment import _subsample, aggregate, evaluate, prepare
-from src.models import LinUCBPolicy, PopularityPolicy, Session
-from src.simulator import build_sessions, run_policy
+from src.artifacts import load_artifacts
+from src.config import SimConfig, som
+from src.experiment import make_policies, run_simulation
+from src.models import Ctx, relevance
 
-st.set_page_config(page_title="AOV Recommender Lab", page_icon="🛒", layout="wide")
+st.set_page_config(page_title="Which recommender earns more?", page_icon="🛒", layout="wide")
+ART = os.environ.get("AOV_ARTIFACTS", "artifacts")
 
-
-# ---------------------------------------------------------------- sidebar
-def list_files():
-    env = os.environ.get("AOV_DATA")
-    if env:
-        return [env]
-    folder = Path("data/raw")
-    return sorted(str(p) for p in list(folder.glob("*.csv")) + list(folder.glob("*.xlsx")))
-
-
-files = list_files()
-st.sidebar.title("Settings")
-if not files:
-    st.error("No dataset found. Put the Kaggle CSV into `data/raw/` and refresh.")
+if not (Path(ART) / "meta.json").exists():
+    st.error("No trained models found. Train once, then reload this page:")
+    st.code("python train.py --data data/raw", language="bash")
     st.stop()
-path = st.sidebar.selectbox("Dataset file", files)
-top_k = st.sidebar.slider("Products to keep (most popular)", 100, 1000, 500, 50,
-                          help="Rare products are dropped; fewer products = faster.")
-min_support = st.sidebar.select_slider(
-    "Rule min. support", [0.002, 0.003, 0.005, 0.01, 0.02], value=0.005,
-    help="A rule must appear in at least this share of orders. Lower = more rules, slower.")
 
 
-@st.cache_resource(show_spinner="Loading data and training the models (can take a minute)...")
-def load_and_train(path, top_k, min_support):
-    return prepare(load_dataset(path, top_k), min_support=min_support)
+@st.cache_resource
+def get_bundle(path):
+    return load_artifacts(path)
 
 
-@st.cache_resource(show_spinner="Pre-training the bandit inside the simulator...")
-def warm_bandit(_prep, key, alpha):
-    ds, cfg = _prep.ds, SimConfig()
-    pol = LinUCBPolicy(_prep.arms, ds.prices, _prep.ctxb.dim, alpha, name="LinUCB (bandit)")
-    warm = build_sessions(_subsample(ds.train, 15000), _prep.ctxb, ds.prices, cfg, np.random.default_rng(0))
-    run_policy(pol, warm, ds.prices, cfg, learn=True)
-    return pol
+@st.cache_data(show_spinner=False)
+def simulate(path, cfg_items, orders, repeats, fixed_items):
+    return run_simulation(get_bundle(path), SimConfig(**dict(cfg_items)), repeats, orders,
+                          list(fixed_items))
 
 
-prep = load_and_train(path, top_k, min_support)
-ds = prep.ds
+@st.cache_data(show_spinner=False)
+def stop_slope(path, cfg_items):
+    return estimate_stop_slope(get_bundle(path), SimConfig(**dict(cfg_items)))
 
-st.title("🛒 Raising Average Order Value with Recommendations")
-tab_how, tab_live, tab_sim = st.tabs(["1 · How it works", "2 · Try it live", "3 · Run the simulation"])
 
-# ---------------------------------------------------------------- tab 1
-with tab_how:
-    st.header("The idea in one minute")
-    st.markdown("""
-A shopper has some items in the **cart**. Just before checkout the app shows **one extra
-item** ("Add this too?"). If the shopper accepts, the order gets bigger.
-**AOV (average order value)** = the average money spent per order. The goal is to pick the
-suggestion that raises it the most.
+def pct(v):
+    return f"{v:+.1f}%"
 
-We compare **three ways of choosing that suggestion**:
-""")
-    c1, c2, c3 = st.columns(3)
-    c1.subheader("① Association rules")
-    c1.markdown("Looks at past orders and finds items **bought together** "
-                "(*\"people with A and B also buy C\"*). Simple, explainable, no learning at runtime.")
-    c2.subheader("② Sequential model")
-    c2.markdown("Looks at **what a customer bought, in order**, and predicts what usually "
-                "comes next (a Markov chain). Uses the customer's history plus the current cart.")
-    c3.subheader("③ Contextual bandit")
-    c3.markdown("A model that **learns by trial and error**. It tries suggestions, sees whether "
-                "they were accepted (and how much money they brought), and adapts. It also uses "
-                "context: cart size, cart value, weekday, hour, type of items.")
 
-    st.header("Why a simulation?")
-    st.markdown("""
-Our dataset only contains **finished orders**. It never recorded *\"we suggested X, did the shopper
-accept?\"*, so we can't measure uplift directly. So we **simulate shoppers**:
+b = get_bundle(ART)
+cat, rules, meta = b.cat, b.rules, b.meta
 
-1. Take a real finished order from the **test period** (orders the models never saw).
-2. Randomly put **half of its items into the cart**. The other half are the shopper's **hidden wants**
-   (things they would plausibly like).
-3. Each model sees only the cart (and history) and suggests one item.
-4. The simulated shopper **accepts** with probability `p_hit` if the item is one of their hidden wants,
-   or a small `p_miss` if not (impulse buy). More expensive items are accepted a bit less often.
-5. If accepted, the item's price is added to the order. Repeat for thousands of orders and several
-   random seeds, then compare **AOV with vs. without recommendations**.
+st.title("🛒 Which recommender earns the most?")
+st.caption("We replay real orders from the test period, let each model suggest products at "
+           "checkout, and simulate whether shoppers accept them. All money is in so'm.")
+st.info("**How to read this page**  ① Pick the situation below.  ② The table shows, for every model, "
+        "how much it adds to the average order.  ③ **Real revenue** also counts shoppers who left "
+        "because the price felt too high - this is what the business actually earns.")
 
-All models face the **same random numbers**, so the comparison is fair.
-""")
-    st.header("Data")
-    n_cust = len(prep.seq.history)
-    a, b, c, d = st.columns(4)
-    a.metric("Products used", ds.V)
-    b.metric("Training orders (past)", f"{len(ds.train):,}")
-    c.metric("Test orders (future)", f"{len(ds.test):,}")
-    d.metric("Known customers", f"{n_cust:,}")
-    st.caption(f"Association rules learned: **{prep.ar.n_rules:,}**. Orders are split by time: "
-               "first 70% to learn from, last 30% to test on, like in real life.")
-    st.header("How to read the results")
-    st.markdown("""
-* **Uplift (%)**: how much higher AOV is with the recommender than without. Higher is better.
-* **Acceptance rate**: share of suggestions the simulated shopper accepted.
-* **Relevant picks**: share of suggestions that were one of the shopper's hidden wants.
-* **Random** and **Popularity** are baselines. A real model should beat them.
-* ⚠️ The shopper's behaviour is **assumed**, not observed. Trust the **ranking** of the models and
-  check it still holds when you change the assumptions (tab 3), more than the exact percentages.
-""")
+# --------------------------------------------------------------------- step 1: the situation
+st.subheader("① Choose the situation")
+pmin, pmax = int(cat.prices.min()), int(cat.prices.max())
+step = 1000 if pmax > 100_000 else 100
+default_limit = int(min(max(round(np.quantile(cat.prices, 0.9), -3), pmin), pmax))
+labels = {f"{cat.label(i)} · {som(cat.prices[i])}": int(i) for i in cat.pop_order[:300]}
 
-# ---------------------------------------------------------------- tab 2
-with tab_live:
-    st.header("Build a cart and see what each model suggests")
-    order = list(prep.pop_order)
+with st.form("settings"):
+    c1, c2, c3, c4 = st.columns(4)
+    n_slots = c1.slider("Suggestions shown", 1, 10, 10)
+    c1.caption("How many products appear at checkout (up to 10).")
+    limit = c2.slider("Highest price allowed (so'm)", pmin, pmax, default_limit, step)
+    no_limit = c2.checkbox("No price limit", value=False)
+    c2.caption("Pricier products are never suggested. The list is shown cheapest first.")
+    s = c3.select_slider("Price sensitivity", [0.0, 0.15, 0.4, 0.8], value=0.15,
+                         format_func=lambda v: {0.0: "None", 0.15: "Low", 0.4: "Medium", 0.8: "High"}[v])
+    c3.caption("How much a higher price lowers the chance that a shopper accepts.")
+    stop = c4.select_slider("Shoppers who stop after accepting", [0.20, 0.25, 0.30, 0.40], value=0.30,
+                            format_func=lambda v: f"{int(round(v * 100))}%")
+    c4.caption("Share who leave because it feels too pricey. 20% = same as without suggestions.")
 
-    def label(i):
-        name = (ds.names[i] or ds.item_ids[i]).strip().title()
-        return f"{name} [{ds.item_ids[i]}] · £{ds.prices[i]:.2f}"
+    with st.expander("More settings (optional)"):
+        a1, a2, a3 = st.columns(3)
+        finish = a1.slider("Orders that finish without suggestions", 0.5, 1.0, 0.80, 0.05)
+        a1.caption("The rest leave without buying (default 20%).")
+        p_hit = a2.slider("Accept a product they wanted", 0.1, 1.0, 0.50, 0.05)
+        a2.caption("Chance to accept a suggestion the shopper was planning to buy.")
+        p_miss = a3.slider("Accept an unrelated product", 0.0, 0.3, 0.03, 0.01)
+        a3.caption("Chance to accept something unplanned (often removed again).")
+        b1, b2, b3 = st.columns(3)
+        orders = b1.select_slider("Orders replayed per repeat", [500, 1000, 1500, 3000, 5000], value=1500)
+        b1.caption("More orders = steadier numbers but slower.")
+        repeats = b2.select_slider("Repeats", [1, 2, 3, 5], value=2)
+        b2.caption("Repeating shows how stable the result is (the ± in the table).")
+        fixed_sel = b3.multiselect("Fixed list products", list(labels), default=list(labels)[:10],
+                                   max_selections=20)
+        b3.caption("Shown to everyone in the 'Fixed list' model. Default: 10 best sellers.")
+    st.form_submit_button("Update results", type="primary")
 
-    labels = {label(i): int(i) for i in order}
-    left, right = st.columns([3, 1])
-    chosen = left.multiselect("Items in the cart (type to search)", list(labels), max_selections=15)
-    customers = ["Guest (no history)"] + [str(c) for c in sorted(prep.seq.history)[:300]]
-    cust = right.selectbox("Customer", customers,
-                           help="Known customers give the sequential model their purchase history.")
-    c1, c2, c3 = st.columns(3)
-    weekday = c1.selectbox("Weekday", ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], index=2)
-    hour = c2.slider("Hour", 6, 22, 12)
-    n_show = c3.slider("Suggestions per model", 1, 5, 3)
+if s > 0:
+    st.caption(f"With this price sensitivity, the price that earns the most per suggestion is "
+               f"about **{som(cat.ref / s)}**.")
+cfg = SimConfig(n_slots=n_slots, price_limit=float("inf") if no_limit else float(limit),
+                price_sensitivity=s, p_hit=p_hit, p_miss=p_miss, finish_base=finish,
+                stop_after_accept=stop)
+cfg_items = tuple(sorted(asdict(cfg).items()))
+fixed_items = tuple(labels[x] for x in fixed_sel) or tuple(int(i) for i in cat.pop_order[:10])
+pols = [p for p in make_policies(b, cfg, list(fixed_items)) if p.name != "Expected value"]
+blurb = {p.name: p.blurb for p in pols}
 
-    if not chosen:
-        st.info("Add at least one item to the cart.")
+tab_cmp, tab_cart = st.tabs(["📊 Compare models", "🧺 Try a cart"])
+
+# ------------------------------------------------------------------------- step 2: the table
+with tab_cmp:
+    with st.spinner("Simulating all models (a few seconds)..."):
+        summary, bands = simulate(ART, cfg_items, orders, repeats, fixed_items)
+    summary = summary[summary["policy"] != "Expected value"].reset_index(drop=True)
+    bands = bands[bands["policy"] != "Expected value"]
+    base_aov = summary["AOV_base"].iloc[0]
+    
+    st.subheader("② What each model adds")
+    best_aov = summary.loc[summary["AOV_uplift_pct"].idxmax()]
+    best_rev = summary.loc[summary["RPS_uplift_pct"].idxmax()]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Average order without suggestions", som(base_aov))
+    m2.metric(f"Biggest order increase: {best_aov['policy']}",
+              f"+{som(best_aov['extra_per_order'])}", pct(best_aov["AOV_uplift_pct"]))
+    m3.metric(f"Best real revenue: {best_rev['policy']}",
+              pct(best_rev["RPS_uplift_pct"]), f"± {best_rev['RPS_uplift_pct_ci95']:.1f}", delta_color="off")
+    if best_rev["RPS_uplift_pct"] > best_rev["RPS_uplift_pct_ci95"] and best_rev["RPS_uplift_pct"] > 0.5:
+        st.success(f"**{best_rev['policy']}** earns the most real revenue: "
+                   f"{som(best_rev['extra_per_1000_started'])} more per 1 000 started orders.")
     else:
-        cart = np.array([labels[x] for x in chosen])
-        ts = pd.Timestamp("2010-06-14") + pd.Timedelta(days=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].index(weekday), hours=hour)
-        customer = -1 if cust.startswith("Guest") else int(cust)
-        sess = Session(cart, customer, ts, prep.ctxb.build(cart, ts))
-        st.metric("Current cart value", f"£{ds.prices[cart].sum():.2f}")
+        st.warning("No model clearly increases real revenue in this situation: the larger orders are "
+                   "cancelled out by shoppers who leave. Try a lower price limit, lower price "
+                   "sensitivity, or fewer shoppers stopping.")
 
-        bandit = warm_bandit(prep, (path, top_k, min_support), 0.1)
-        models = [(prep.ar, "① Association rules"), (prep.seq, "② Sequential (Markov)"),
-                  (bandit, "③ Contextual bandit"), (PopularityPolicy(prep.pop_order), "Baseline: best sellers")]
-        cols = st.columns(4)
-        for col, (pol, title) in zip(cols, models):
-            col.subheader(title)
-            recs = pol.recommend(sess, n_show)
-            rows = []
-            for i in recs:
-                row = {"Item": (ds.names[i] or ds.item_ids[i]).strip().title(), "Price": f"£{ds.prices[i]:.2f}"}
-                if hasattr(pol, "scores"):
-                    row["Score"] = round(float(pol.scores(sess)[i]), 3)
-                rows.append(row)
-            col.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-        st.caption("Association rules / Markov rank their shortlist by score × price, so pricier items win "
-                   "among similarly likely ones. Score ≈ how strongly the model links the cart to the item "
-                   "(for rules: confidence). The bandit has no score because it picks by learned expected revenue.")
+    tbl = pd.DataFrame({
+        "Model": summary["policy"],
+        "What it does": summary["policy"].map(blurb),
+        "Average order with suggestions": summary["AOV_policy"],
+        "Added to order (so'm)": summary["extra_per_order"],
+        "Added to order (%)": summary["AOV_uplift_pct"],
+        "Real revenue change (%)": summary["RPS_uplift_pct"],
+        "± (%)": summary["RPS_uplift_pct_ci95"],
+        "Suggestions accepted (%)": 100 * summary["conversion"],
+        "Orders completed (%)": 100 * summary["finish_rate"],
+        "Value per suggestion (so'm)": summary["value_per_suggestion"]})
+    money = lambda v: f"{v:,.0f}".replace(",", " ")  # noqa: E731
+    sty = (tbl.style.format({"Average order with suggestions": money, "Added to order (so'm)": money,
+                             "Value per suggestion (so'm)": money, "Added to order (%)": "{:+.1f}%",
+                             "Real revenue change (%)": "{:+.1f}%", "± (%)": "{:.1f}",
+                             "Suggestions accepted (%)": "{:.1f}%", "Orders completed (%)": "{:.1f}%"})
+           .highlight_max(subset=["Added to order (so'm)", "Added to order (%)", "Real revenue change (%)",
+                                  "Value per suggestion (so'm)"],
+                          props="background-color:#1b7f3b;color:#ffffff;font-weight:600"))
+    st.dataframe(sty, hide_index=True, use_container_width=True)
+    st.caption("**Added to order** = how much larger the average *finished* order gets. "
+               "**Real revenue change** = money per *started* order, including shoppers who left - "
+               "the true business result. **Value per suggestion** = money kept in carts ÷ suggestions shown. "
+               "Green = best in column. Random shows how much is just noise.")
+    st.download_button("Download table (CSV)", summary.to_csv(index=False), "model_comparison.csv")
 
-# ---------------------------------------------------------------- tab 3
-with tab_sim:
-    st.header("Simulate shoppers and compare AOV uplift")
-    st.markdown("These sliders are the **assumptions** about shopper behaviour.")
-    a, b, c = st.columns(3)
-    p_hit = a.slider("p_hit: accept an item they wanted", 0.1, 0.9, 0.5, 0.05)
-    p_miss = b.slider("p_miss: accept an unrelated item", 0.0, 0.2, 0.03, 0.01)
-    price_s = c.slider("Price sensitivity", 0.0, 1.0, 0.15, 0.05,
-                       help="Higher = expensive items are accepted less often.")
-    d, e, f, g = st.columns(4)
-    slots = d.slider("Suggestions shown", 1, 3, 1)
-    seeds = e.slider("Repeats (random seeds)", 1, 8, 3)
-    max_test = f.select_slider("Orders per repeat", [1000, 2000, 3000, 5000, 10000], value=3000)
-    alpha = g.select_slider("Bandit exploration (alpha)", [0.02, 0.05, 0.1, 0.2, 0.3], value=0.1)
+    chart = tbl.set_index("Model")[["Added to order (%)", "Real revenue change (%)"]]
+    st.bar_chart(chart, y_label="% change vs no suggestions")
+    st.caption("The gap between the two bars is shoppers who stopped because of price.")
 
-    if st.button("▶ Run simulation", type="primary"):
-        cfg = SimConfig(p_hit=p_hit, p_miss=p_miss, price_sensitivity=price_s, slots=slots)
-        with st.spinner("Simulating shoppers..."):
-            df, curves = evaluate(prep, cfg, seeds, alpha, max_test)
-        st.session_state["result"] = (aggregate(df), curves)
+    # ------------------------------------------------------------- step 3: price vs conversion
+    st.subheader("③ Price vs conversion")
+    st.caption("Cheap products are accepted more often, but value = chance to accept × price. "
+               "A product accepted 70% of the time at 5 earns 3.5; one accepted 30% at 30 earns 9.")
+    names = list(summary["policy"])
+    pick = st.selectbox("Model", names, index=names.index(best_rev["policy"]))
+    bb = bands[bands["policy"] == pick].set_index("band")
+    cc = st.columns(2)
+    cc[0].markdown("**Suggestions accepted (%), by price band**")
+    cc[0].bar_chart(100 * bb["conversion"])
+    cc[1].markdown("**Value per suggestion (so'm), by price band**")
+    cc[1].bar_chart(bb["value_per_suggestion"])
+    if bb["shown"].iloc[0] > 0 and bb["shown"].iloc[3] > 0:
+        lo, hi = bb.iloc[0], bb.iloc[3]
+        st.caption(f"{pick}: the cheapest quarter of products is accepted {100 * lo['conversion']:.1f}% of the "
+                   f"time and earns {som(lo['value_per_suggestion'])} per suggestion; the priciest quarter is "
+                   f"accepted {100 * hi['conversion']:.1f}% and earns {som(hi['value_per_suggestion'])}.")
 
-    if "result" in st.session_state:
-        summary, curves = st.session_state["result"]
-        best = summary.loc[summary["uplift_pct"].idxmax()]
-        st.success(f"Best policy: **{best['policy']}** with **+{best['uplift_pct']:.2f}%** AOV "
-                   f"(from £{best['AOV_base']:.2f} to £{best['AOV_policy']:.2f} per order).")
-        show = summary.rename(columns={
-            "policy": "Policy", "AOV_base": "AOV no recs (£)", "AOV_policy": "AOV with recs (£)",
-            "uplift_abs": "Added per order (£)", "uplift_pct": "Uplift (%)",
-            "accept_rate": "Acceptance rate", "relevance_rate": "Relevant picks",
-            "uplift_pct_ci95": "± 95% CI (pp)"})
-        st.dataframe(show.round(3), hide_index=True, use_container_width=True)
-        st.subheader("AOV uplift (%)")
-        st.bar_chart(summary.set_index("policy")["uplift_pct"])
-        st.subheader("Performance over time (rolling average of £ added per order)")
-        win = max(50, min(500, len(next(iter(curves.values()))[0]) // 5))
-        curve_df = pd.DataFrame({k: pd.Series(np.mean(v, axis=0)).rolling(win).mean() for k, v in curves.items()})
-        st.line_chart(curve_df.dropna())
-        st.caption("The cold-start bandit starts with no knowledge and improves as orders arrive; "
-                   "the warm-start one was pre-trained inside the simulator on past orders.")
-        st.download_button("Download results (CSV)", summary.to_csv(index=False), "summary.csv")
+# ----------------------------------------------------------------------------- try a cart
+with tab_cart:
+    st.caption("Build a cart and see what a model would suggest. The best business value is always first.")
+    names_live = [p.name for p in pols]
+    model = st.selectbox("Model", names_live)
+    opts = {f"{cat.label(i)} · {som(cat.prices[i])}": int(i) for i in cat.pop_order[:300]}
+    picked = st.multiselect("Products in the cart", list(opts), max_selections=15, default=list(opts)[20:23])
+    cart = np.array([opts[x] for x in picked], dtype=int)
+
+    seq = next((p for p in pols if p.name == "Sequential"), None)
+    hist = seq.model.history if seq is not None else {}
+    who = st.radio("Shopper", ["New shopper (no history)", "Returning shopper"], horizontal=True)
+    customer = -1
+    if who.startswith("Returning"):
+        if not hist:
+            st.info("No customer histories were saved with the models.")
+        else:
+            ids = sorted(hist, key=lambda c: -len(hist[c]))[:200]
+            customer = st.selectbox("Customer", ids,
+                                    format_func=lambda c: f"Customer {c} · {len(hist[c])} past items")
+            st.caption("Recently bought: " + ", ".join(cat.label(int(i)) for i in hist[customer][-8:]))
+            if model != "Sequential":
+                st.caption("ℹ Only the **Sequential** model uses purchase history; this model ignores it.")
+
+    if len(cart) == 0:
+        st.info("Add at least one product to the cart.")
+    else:
+        pol = next(p for p in pols if p.name == model)
+        st.write(f"Cart value: **{som(cat.prices[cart].sum())}**")
+        st.caption(blurb.get(pol.name, pol.blurb))
+        if "cold" in pol.name.lower() and "bandit" in pol.name.lower():
+            st.warning("Cold-start bandit has learned nothing yet here, so its picks are close to random. "
+                       "It only improves during the simulation in the comparison table.")
+        ts = time.time_ns()
+        vec = pol.ctxb.build(cart, ts) if hasattr(pol, "ctxb") else None
+        recs = pol.recommend(cart, n_slots, cfg.price_limit, Ctx(customer, ts, vec))
+        if not recs:
+            st.write("Nothing to suggest under this price limit.")
+        else:
+            rel = relevance(rules, cat, cart)
+            chance = rel * cfg.p_hit * np.exp(-cfg.price_sensitivity * cat.prices / cat.ref)
+            value = chance * cat.prices                       # business value = chance x price
+            recs = sorted((int(i) for i in recs), key=lambda i: -value[i])   # best value first
+            st.dataframe(pd.DataFrame({
+                "Product": [cat.label(i) for i in recs],
+                "Price": [som(cat.prices[i]) for i in recs],
+                "Chance to accept": [f"{100 * chance[i]:.1f}%" for i in recs],
+                "Business value": [som(int(round(value[i]))) for i in recs]}),
+                hide_index=True, use_container_width=True)
+            st.caption("**Business value** = chance to accept × price. Sorted automatically, best first. "
+                       "Chance and value come from the cart only, so they do not change with shopper history.")
+            if s == 0:
+                st.caption("⚠ Price sensitivity is None: expensive products look as good as cheap ones, "
+                           "so pricey items are favoured. Try Low or Medium.")
+            st.caption(f"Expected extra revenue if all are shown: **{som(int(round(value[recs].sum())))}**.")

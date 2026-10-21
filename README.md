@@ -1,57 +1,98 @@
-# Increasing AOV in app sales: Association Rules vs Sequential Models vs Contextual Bandits
+# AOV recommender lab
 
-Simulation study comparing three recommenders on **average order value (AOV)**.
+Which product recommender raises the **order value** and the **real revenue** of an online shop?
+Seven models are trained once, saved, and compared in a one-page Streamlit app. All money is in **so'm**.
 
-## Dataset: Online Retail II (UCI / Kaggle)
-Search Kaggle for **"Online Retail II UCI"** (or the UCI ML Repository) and save the file as
-`data/raw/` (any file name, `.csv` or `.xlsx`). Why this dataset: invoices (baskets),
-timestamps, customer IDs (purchase sequences) and **unit prices** (needed for AOV).
-Caveat: it is a wholesale/gift retailer, not a mobile app. State this in the report.
-`python -m src.synthetic` (writes to data/raw/) creates a fake dataset in the same format for a quick smoke test.
-**Results on synthetic data are only a pipeline demo.**
+## Data (real, no synthetic data)
+
+Kaggle: [Online Retail II](https://www.kaggle.com/datasets/lakshmi25npathi/online-retail-dataset)
+(`online_retail_II.xlsx`, also on UCI). Real transactions of a UK-based online gift-ware shop,
+01/12/2009 – 09/12/2011. Many customers are wholesalers.
+
+| Sheet | Rows | Columns |
+|---|---|---|
+| Year 2009-2010 | 525 461 | 8 |
+| Year 2010-2011 | 541 910 | 8 |
+
+Columns: `Invoice` (starts with `C` = cancellation), `StockCode`, `Description`, `Quantity`,
+`InvoiceDate`, `Price` (£ per unit), `Customer ID`, `Country`. (CSV copies use `InvoiceNo` /
+`UnitPrice` / `CustomerID` - both spellings work.) The two sheets overlap in Dec 2010; duplicates
+are removed automatically. Cancellations, non-product codes, zero prices and returns are dropped.
+
+**Rows are not orders.** The ~1.07 million rows are *line items* (one product on one invoice).
+They form only **~39 500 orders** (about 15 different products each); after the time split,
+~25 300 orders are used to train and ~10 200 to test. All 4 426 products seen in training are
+used by default (they cover 95% of purchased items).
 
 ## Quick start
+
 ```bash
 pip install -r requirements.txt
-# put the Kaggle CSV into data/raw/ (any file name)
-streamlit run app.py                       # interactive UI: explanation, live demo, simulation
-python run_experiment.py --sensitivity     # same experiment from the command line -> results/
-pytest
+# 1. download online_retail_II.xlsx from Kaggle and put it into data/raw/
+python train.py                 # reads data/raw/*, merges, trains ONCE, saves to artifacts/
+streamlit run app.py            # the app only loads the saved models (seconds)
+python run_experiment.py        # same comparison from the command line -> results/
+pytest                          # 21 tests (use a tiny fake file, not your data)
 ```
-Outputs go to `results/`: `summary.csv/.md`, `per_seed.csv`, `aov_uplift.png`,
-`learning_curves.png`, `sensitivity.csv/.png`.
-Useful flags: `--top-k 500 --seeds 5 --slots 1 --alpha 0.1 --min-support 0.005 --arms 100`.
 
-## Pipeline
-1. **Clean** (`src/data.py`): drop cancellations, non-positive qty/price, non-product codes.
-2. **Split chronologically** by invoice (70% train / 30% test). Vocabulary = top-K train items.
-   Item price = median unit price (1 unit per item).
-3. **Models** (`src/models/`), all choosing 1 item for the cart (`--slots` for more):
-   - *Association rules*: FP-Growth, rules with 1-2 item antecedents, score = confidence, filtered by lift > 1.
-   - *Sequential*: decayed Markov chain over each customer's chronological item stream
-     (+ current cart as the most recent items). Upgrade path: GRU4Rec/SASRec.
-   - *Contextual bandit*: disjoint LinUCB, arm = one of the top-100 popular items, context =
-     cart size, cart value, weekday/hour, mean SVD embedding of cart items.
-     Reward = accepted x price (scaled). Reported cold-start and warm-start (pre-trained in the simulator on train sessions).
-   - Baselines: Random, Popularity (best seller not in cart).
-   - Association rules and Markov rank their shortlist by score x price (revenue-aware);
-     both fall back to popularity if nothing matches.
-4. **Simulator** (`src/simulator.py`): each test basket = one checkout session. Random half is
-   the *cart*, the rest are *latent wants*. Shown item accepted with
-   `p_hit` (latent want) or `p_miss` (not), multiplied by `exp(-s * price/median_price)`.
-   Accepted items add their price. Uniform random draws are shared across policies (common random
-   numbers), and everything is repeated over seeds (different cart splits and draws).
-5. **Metrics**: AOV, AOV uplift (abs and %), acceptance rate, relevance rate, 95% CI over seeds.
+The first `train.py` run reads the Excel file (slow: about 7 s per 100 000 rows in my test, so
+roughly a minute or more for the full file) and caches it as Parquet in `data/cache/`; later
+runs start in seconds. CSV and Parquet files work too, and every file in `data/raw/` is merged.
 
-## Assumptions and limitations (write these in the report)
-- Acceptance behaviour is **simulated**, not observed. Absolute uplift depends on `p_hit`, `p_miss`,
-  `price_sensitivity`; use `--sensitivity` and compare *rankings*, not absolute numbers.
-- "Latent wants" = the rest of the real basket, which favours models that capture co-purchase.
-- Bandit arms are limited to top-N items; AR/Markov may recommend any vocabulary item.
-- Row order inside an invoice is used as order for the sequential model; cross-invoice order is real.
-- Customer history is static (train period only); guests have no history.
-- Next steps: Thompson sampling, neural sequential model, multiple slots, off-policy evaluation.
+Options: `--fx 16100` (so'm per £1 - **check the Central Bank rate**), `--since 2011-01-01`,
+`--top-k 500` (only the K most popular products; default: ALL - with 500 the carts keep just 48%
+of the purchased items and percentages look inflated), `--currency UZS` (your own data already in so'm),
+`--no-item-filter` (keep all item codes; the default keeps Online Retail's 5-digit product codes).
 
-## Report outline
-Intro and AOV motivation -> Data -> Methods (3 models) -> Simulation design and assumptions ->
-Results (table + figures) -> Sensitivity -> Limitations -> Conclusion.
+If something crashes oddly (e.g. `'Bundle' object has no attribute 'seq'`), run
+`python3 check_install.py`: it detects old/mixed files, leftover `src/models/`, and fake data in
+`data/raw/`. Always extract the zip into a **new** folder instead of copying files over an old one.
+
+## The seven models
+
+| Model | Idea |
+|---|---|
+| Random | Random products - the floor every model must beat. |
+| Fixed list | The same best sellers for everyone (editable in the app). |
+| Association rules | Products often bought together with the cart items. |
+| Sequential | Next product from the customer's past orders and the cart (Markov chain). |
+| Contextual bandit, cold start | LinUCB: learns what shoppers accept while running, from zero. |
+| Contextual bandit, warm start | Same, pre-trained on past orders first. |
+
+Every model returns at most 10 items: cart items removed, items above the price limit removed,
+**shown cheapest first**.
+
+## The simulation (shopper behaviour is assumed)
+
+The data has no accept/reject logs, so shoppers are simulated. Half of a real test order is the
+cart; the model suggests; the shopper accepts (wanted items more often, less often when pricey,
+less often in lower positions), may remove items again, and then finishes or stops: **80% finish
+when nothing is accepted; after accepting, about 30% stop**, more often when the add-on is
+expensive relative to the cart. The app shows, per model: average order with suggestions, the
+amount and % added, **real revenue change** (counts shoppers who left), acceptance, completion,
+value per suggestion, and conversion by price band. Time-ordered split: the models learn from the
+older 70% of orders and are tested on the newer 30%.
+
+## Layout
+
+```
+check_install.py      detects old / mixed project files
+train.py              train once -> artifacts/
+app.py                Streamlit app (compare models + try a cart)
+run_experiment.py     the same comparison from the command line
+src/data.py           load Excel/CSV/Parquet, merge, clean, baskets, time split, so'm prices
+src/models.py         the seven models
+src/simulator.py      suggest -> accept -> remove -> finish or stop
+src/artifacts.py      save / load (csv + npz + json, no pickle)
+src/training.py       fit + save
+tests/                21 tests (tests/fake_data.py is a tiny fixture, never used for training)
+```
+
+## Limits to keep in mind
+
+* Accepting, removing and stopping are **assumptions**; results compare models under them and
+  are not real-world gains. Real checkout / accept-reject logs would replace them.
+* Prices are 2009–2011 UK prices converted at a fixed rate: a relabel, not an inflation or
+  purchasing-power adjustment. Orders are wholesale-sized (about 15 products), unlike a typical
+  consumer basket.
+* The cart counts 1 unit per product, so "average order" is not the real invoice value.

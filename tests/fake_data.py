@@ -1,29 +1,32 @@
-"""Synthetic transactions in the Online Retail II schema (for demos / tests only).
+"""TEST FIXTURE ONLY - tiny fake transactions in the Online Retail II layout.
+
+Not used by train.py / the app (those only read your real files). It exists so the unit
+tests run in seconds without the 90 MB dataset.
 
 Structure planted in the data: item bundles inside categories (co-purchase signal),
 customer-specific favourite categories, and a category-to-next-category chain
 (cross-basket sequential signal). Results on this data are NOT scientifically meaningful.
 """
-import argparse
-
 import numpy as np
 import pandas as pd
 
 
-def generate(n_items=300, n_cats=20, n_customers=1500, n_invoices=20000, seed=0) -> pd.DataFrame:
+def generate(n_items=300, n_cats=20, n_customers=1500, n_invoices=20000, seed=0,
+             start="2020-01-01", days=365 * 3, price_scale=1.0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     item_cat = np.arange(n_items) % n_cats
     pop = 1.0 / (1 + rng.permutation(n_items)) ** 0.8
     cat_price = np.exp(rng.normal(1.2, 0.6, n_cats))
-    price = np.round(cat_price[item_cat] * np.exp(rng.normal(0, 0.3, n_items)), 2).clip(0.2)
+    price = cat_price[item_cat] * np.exp(rng.normal(0, 0.3, n_items)) * price_scale
+    price = (np.round(price, -2).clip(100) if price_scale >= 100 else np.round(price, 2).clip(0.2))
     bundles = {c: [rng.choice(np.flatnonzero(item_cat == c), 4, replace=False) for _ in range(3)]
                for c in range(n_cats)}
     next_cat = rng.permutation(n_cats)
     fav = rng.integers(0, n_cats, size=(n_customers, 2))
     last_cat = {}
 
-    start = pd.Timestamp("2010-12-01")
-    secs = np.sort(rng.integers(0, 365 * 24 * 3600, n_invoices))
+    start = pd.Timestamp(start)
+    secs = np.sort(rng.integers(0, days * 24 * 3600, n_invoices))
     rows = []
     for k, sec in enumerate(secs):
         ts = start + pd.Timedelta(seconds=int(sec))
@@ -59,13 +62,3 @@ def generate(n_items=300, n_cats=20, n_customers=1500, n_invoices=20000, seed=0)
                          12000.0 + cust if not guest else np.nan, "United Kingdom"))
     return pd.DataFrame(rows, columns=["Invoice", "StockCode", "Description", "Quantity",
                                        "InvoiceDate", "Price", "Customer ID", "Country"])
-
-
-if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--out", default="data/raw/synthetic_retail.csv")
-    p.add_argument("--invoices", type=int, default=20000)
-    a = p.parse_args()
-    df = generate(n_invoices=a.invoices)
-    df.to_csv(a.out, index=False)
-    print(f"Wrote {len(df)} rows / {df['Invoice'].nunique()} invoices to {a.out}")

@@ -1,0 +1,33 @@
+{
+  "schema": 2,
+  "created": "2026-10-21T10:21:57+00:00",
+  "source_currency": "GBP",
+  "fx_to_som": 16100.0,
+  "price_unit": "so'm",
+  "files": [
+    "online_retail_II.xlsx"
+  ],
+  "top_k": null,
+  "train_frac": 0.7,
+  "min_count": 12,
+  "min_conf": 0.05,
+  "n_rules": 119451,
+  "train_seconds": 1.4,
+  "median_price": 40250.0,
+  "versions": {
+    "numpy": "2.0.2",
+    "pandas": "2.3.3",
+    "scipy": "1.13.1"
+  },
+  "rows": 1003212,
+  "orders": 39516,
+  "products_total": 4877,
+  "date_min": "2009-12-01",
+  "date_max": "2011-12-09",
+  "n_train": 25303,
+  "n_test": 10186,
+  "vocab_size": 4426,
+  "row_coverage": 0.9485,
+  "test_start": "2011-05-26",
+  "fx": 16100.0
+}

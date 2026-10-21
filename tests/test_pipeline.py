@@ -1,70 +1,247 @@
 import numpy as np
+import pandas as pd
 import pytest
 
-from src.config import SimConfig
-from src.data import build_dataset, clean_transactions
-from src.experiment import aggregate, evaluate, prepare
-from src.models import LinUCBPolicy, Session
-from src.models.base import Policy
-from src.simulator import build_sessions, run_policy, summarize
-from src.synthetic import generate
+from src.artifacts import load_artifacts
+from src.config import SimConfig, som
+from src.data import Basket, build_dataset, clean_transactions, load_transactions
+from src.experiment import REFERENCE, make_policies, run_simulation
+from src.models import (Ctx, FixedListPolicy, PairRules, SequentialModel, accept_prob, finalize)
+from src.simulator import (_accept_stage, _subsample, build_sessions, calibrate_stop_slope,
+                           run_policy)
+from fake_data import generate
+from src.training import train
+
+ALL_MODELS = ["Random", "Fixed list", "Association rules", "Sequential",
+              "Contextual bandit (cold start)", "Contextual bandit (warm start)", "Expected value"]
 
 
 @pytest.fixture(scope="module")
 def raw():
-    return generate(n_items=120, n_customers=300, n_invoices=3000, seed=1)
+    return generate(n_items=120, n_cats=10, n_customers=400, n_invoices=3000, seed=1)
 
 
 @pytest.fixture(scope="module")
-def ds(raw):
-    return build_dataset(clean_transactions(raw), top_k=120)
+def trained(raw, tmp_path_factory):
+    out = tmp_path_factory.mktemp("art")
+    train(clean_transactions(raw), out, top_k=100, fx=16100.0)
+    return load_artifacts(out)
+
+
+def _ctx(b, cart, customer=-1, ts=0):
+    return Ctx(customer, ts, b.ctxb.build(cart, ts))
 
 
 def test_cleaning_drops_cancellations(raw):
-    clean = clean_transactions(raw)
-    assert not clean["invoice"].str.startswith("C").any()
-    assert (clean["qty"] > 0).all() and (clean["price"] > 0).all()
+    c = clean_transactions(raw)
+    assert not c.invoice.str.startswith("C").any()
+    assert (c.qty > 0).all() and (c.price > 0).all()
+    assert raw.Invoice.str.startswith("C").any()
 
 
-def test_split_is_chronological(ds):
-    assert max(b.ts for b in ds.train) <= min(b.ts for b in ds.test)
-    assert ds.prices.shape == (ds.V,) and (ds.prices > 0).all()
+def test_merge_removes_overlap(raw, tmp_path):
+    raw.iloc[:6000].to_csv(tmp_path / "a.csv", index=False)
+    raw.iloc[4000:].to_csv(tmp_path / "b.csv", index=False)      # 2000 overlapping rows
+    df, files = load_transactions(tmp_path)
+    assert len(files) == 2
+    assert not df.duplicated(["invoice", "item", "qty", "price", "date", "customer"]).any()
+    assert len(df) == len(clean_transactions(raw))
 
 
-class Oracle(Policy):
-    """Cheats: recommends a latent want. Must beat random by a wide margin."""
-    name = "oracle"
-    def __init__(self, sessions):
-        self.map = {id(s.session): next(iter(s.hidden)) for s in sessions}
-    def recommend(self, s, k):
-        return [self.map[id(s)]]
+def test_so_m_conversion_and_split(raw):
+    df = clean_transactions(raw)
+    gbp = build_dataset(df, 100, fx=1.0, round_to=0.01)
+    uzs = build_dataset(df, 100, fx=16100.0, round_to=100)
+    assert (uzs.prices % 100 == 0).all() and (uzs.prices >= 100).all()
+    assert np.allclose(uzs.prices, gbp.prices * 16100, rtol=0.05, atol=100)
+    assert uzs.test[0].ts >= uzs.train[-1].ts                      # chronological, no leakage
+    assert som(1234567) == "1 234 567 so'm"
+    assert any(b.customer >= 0 for b in uzs.test)                  # customers are kept
 
 
-def test_simulator_oracle_beats_random(ds):
-    from src.features import ContextBuilder, fit_item_embeddings
-    from src.models import RandomPolicy
+def test_pair_rules():
+    train_b = [Basket(i, np.array([0, 1])) for i in range(20)] + \
+              [Basket(i, np.array([2, 3])) for i in range(20, 40)]
+    sc = PairRules.fit(train_b, 4, min_count=5, min_conf=0.1).scores([0])
+    assert sc[1] > 0.9 and sc[0] == 0 and sc[2] == 0
+
+
+def test_sequential_uses_customer_history():
+    # customer 7 always buys 0 -> 1 -> 2 over time
+    train_b = [Basket(t, np.array([0, 1, 2]), 7) for t in range(10)]
+    m = SequentialModel.fit(train_b, 4)
+    assert m.scores(np.array([0]), 7)[1] > 0
+    assert m.scores(np.array([0]), 7)[0] == 0                       # cart item never suggested
+    assert m.scores(np.array([3]), -1).sum() == 0                   # unknown item, guest: no signal
+
+
+def test_finalize_filter_then_sort():
+    prices = np.array([500., 100., 300., 900., 200., 700.])
+    out = finalize([3, 5, 0, 2, 1, 4], cart=[0], prices=prices, limit=800, n=3,
+                   fallback=[0, 1, 2, 3, 4, 5])
+    # ranking 3,5,0,2,1,4 -> 3 is above the limit, 0 is in the cart -> first 3 kept: 5, 2, 1
+    assert out == [1, 2, 5]                              # shown cheapest first
+    assert 3 not in out and 0 not in out
+
+
+def test_all_models_respect_the_rules(trained):
+    b = trained
+    pols = make_policies(b, SimConfig())
+    assert [p.name for p in pols] == ALL_MODELS
+    cart = b.test[0].items[:3]
+    for pol in pols:
+        recs = pol.recommend(cart, 10, 2.0 * b.cat.ref, _ctx(b, cart, b.test[0].customer, b.test[0].ts))
+        assert 0 < len(recs) <= 10 and len(set(recs)) == len(recs), pol.name
+        assert not set(recs) & set(cart.tolist()), pol.name               # cart items removed
+        assert all(b.cat.prices[i] <= 2.0 * b.cat.ref for i in recs), pol.name
+        pr = [b.cat.prices[i] for i in recs]
+        assert pr == sorted(pr), pol.name                                  # cheapest first
+
+
+def test_fixed_list_is_top_popular(trained):
+    assert FixedListPolicy(trained.cat).items == [int(i) for i in trained.cat.pop_order[:10]]
+
+
+def test_expected_value_example():
+    assert 0.7 * 5 < 0.3 * 30                                              # the pricier item is worth more
+    assert accept_prob(1.0, 0.0, 1.0, 0.5, 0.0, 0.5) == 0.5
+    assert accept_prob(1.0, 4.0, 1.0, 0.5, 0.0, 0.5) < 0.5
+
+
+class _Silent:
+    warm_start = False
+
+    def reset(self, seed=0):
+        pass
+
+    def update(self, ctx, shown, accepted):
+        pass
+
+
+def test_nothing_suggested_means_no_change(trained):
+    class Nothing(_Silent):
+        name = "None"
+
+        def recommend(self, cart, n, limit=0, ctx=None):
+            return []
+
     cfg = SimConfig()
-    ctxb = ContextBuilder(fit_item_embeddings(ds.train, ds.V), ds.prices)
-    sess = build_sessions(ds.test, ctxb, ds.prices, cfg, np.random.default_rng(0))
-    o = summarize(run_policy(Oracle(sess), sess, ds.prices, cfg))
-    r = summarize(run_policy(RandomPolicy(ds.V), sess, ds.prices, cfg))
-    assert o["uplift_abs"] > 3 * r["uplift_abs"]
+    sess = build_sessions(_subsample(trained.test, 400), trained.cat.prices, cfg, 0, trained.ctxb)
+    m, _ = run_policy(Nothing(), sess, trained.cat, cfg, 0.5)
+    assert m["RPS_uplift_pct"] == pytest.approx(0) and m["AOV_uplift_pct"] == pytest.approx(0)
+    assert m["finish_rate"] == m["finish_rate_base"]
 
 
-def test_linucb_learns_best_arm():
-    prices = np.ones(5)
-    pol = LinUCBPolicy(arms=[0, 1, 2], prices=prices, ctx_dim=2, alpha=0.1)
-    s = Session(np.array([4]), -1, None, np.array([1.0, 0.0]))
-    for _ in range(300):
-        for arm, acc in ((0, False), (1, True), (2, False)):
-            pol.update(s, [arm], [acc])
-    assert pol.recommend(s, 1) == [1]
+def test_oracle_beats_fixed(trained):
+    cfg = SimConfig(position_bias=False)
+    sess = build_sessions(_subsample(trained.test, 500), trained.cat.prices, cfg, 0, trained.ctxb)
+    hidden = {id(s.cart): s.hidden for s in sess}
+
+    class Oracle(_Silent):
+        name = "oracle"
+
+        def recommend(self, cart, n, limit=0, ctx=None):
+            return list(hidden[id(cart)])[:n]
+
+    mo, _ = run_policy(Oracle(), sess, trained.cat, cfg, 0.0)
+    mf, _ = run_policy(FixedListPolicy(trained.cat), sess, trained.cat, cfg, 0.0)
+    assert mo["conversion"] > mf["conversion"] and mo["relevance_rate"] == pytest.approx(1.0)
 
 
-def test_full_evaluation_runs_and_is_deterministic(ds):
-    prep = prepare(ds, min_support=0.01, n_arms=30)
-    d1, _ = evaluate(prep, SimConfig(), seeds=2, max_test=800, max_warm=1500)
-    d2, _ = evaluate(prep, SimConfig(), seeds=2, max_test=800, max_warm=1500)
-    assert np.allclose(d1["uplift_abs"], d2["uplift_abs"])
-    s = aggregate(d1).set_index("policy")
-    assert s.loc["Association Rules", "uplift_pct"] > s.loc["Random", "uplift_pct"]
+def test_bandit_learns_from_feedback(trained):
+    cold = next(p for p in make_policies(trained, SimConfig()) if "cold" in p.name)
+    cart = trained.test[0].items[:3]
+    ctx = _ctx(trained, cart)
+    shown = cold.recommend(cart, 3, float("inf"), ctx)
+    for _ in range(30):
+        cold.update(ctx, shown, [True] + [False] * (len(shown) - 1))      # only the first is accepted
+    again = cold.recommend(cart, 10, float("inf"), ctx)
+    assert again[:] != [] and shown[0] in again
+    cold.reset()
+    assert not cold.b.any()                                                # reset forgets everything
+
+
+def test_stop_penalty_hurts_revenue(trained):
+    out = {}
+    for stop in (0.20, 0.60):
+        s, _ = run_simulation(trained, SimConfig(stop_after_accept=stop), seeds=2, max_orders=800,
+                              max_warm=300)
+        out[stop] = s.set_index("policy").loc[REFERENCE, "RPS_uplift_pct"]
+    assert out[0.20] > out[0.60]                                           # more stopping -> less revenue
+
+
+def test_comparison_table_has_every_model(trained):
+    s, bands = run_simulation(trained, SimConfig(), seeds=1, max_orders=300, max_warm=300)
+    assert list(s["policy"]) == ALL_MODELS
+    assert {"AOV_uplift_pct", "extra_per_order", "RPS_uplift_pct", "conversion"} <= set(s.columns)
+    assert len(bands) == 4 * len(ALL_MODELS)
+
+
+def test_calibration_hits_target(trained):
+    cfg = SimConfig(stop_after_accept=0.30)
+    ref = next(p for p in make_policies(trained, cfg) if p.name == REFERENCE)
+    sess = build_sessions(_subsample(trained.test, 800), trained.cat.prices, cfg, 0, trained.ctxb)
+    k = calibrate_stop_slope(sess, ref, trained.cat, cfg)
+    ratios = []
+    for ss in sess:
+        acc, add, *_ = _accept_stage(ref.recommend(ss.cart, 10, np.inf, ss.ctx), ss, trained.cat, cfg)
+        if acc:
+            ratios.append(add / ss.base_value)
+    assert 0.2 + k * np.mean(ratios) == pytest.approx(0.30, abs=1e-6)
+
+
+def test_deterministic(trained):
+    a, _ = run_simulation(trained, SimConfig(), seeds=1, max_orders=300, max_warm=300)
+    b, _ = run_simulation(trained, SimConfig(), seeds=1, max_orders=300, max_warm=300)
+    pd.testing.assert_frame_equal(a, b)
+
+
+def test_artifacts_roundtrip(raw, trained, tmp_path):
+    again = train(clean_transactions(raw), tmp_path, top_k=100, fx=16100.0)
+    b2 = load_artifacts(tmp_path)
+    cart = trained.test[0].items[:3]
+    assert np.allclose(trained.rules.scores(cart), b2.rules.scores(cart))
+    cu = trained.test[0].customer
+    assert np.allclose(trained.seq.scores(cart, cu), b2.seq.scores(cart, cu))
+    assert np.allclose(trained.ctxb.emb, b2.ctxb.emb)
+    assert np.array_equal(trained.cat.prices, b2.cat.prices)
+    assert len(trained.test) == len(b2.test) and len(trained.warm) == len(b2.warm)
+    assert again["fx_to_som"] == 16100.0
+
+
+def test_kaggle_excel_two_sheets_cached(raw, tmp_path, monkeypatch):
+    """online_retail_II.xlsx: two sheets, Kaggle headers; read once, then served from cache."""
+    import src.data as D
+    monkeypatch.setattr(D, "CACHE_DIR", tmp_path / "cache")
+    x = tmp_path / "online_retail_II.xlsx"
+    with pd.ExcelWriter(x) as w:
+        raw.iloc[:3000].to_excel(w, sheet_name="Year 2009-2010", index=False)
+        raw.iloc[2000:5000].to_excel(w, sheet_name="Year 2010-2011", index=False)   # overlap
+    df, files = load_transactions(x)
+    expected = clean_transactions(raw.iloc[:5000])
+    assert len(files) == 1 and len(df) == len(expected)          # both sheets, overlap removed
+    assert list((tmp_path / "cache").glob("*.parquet"))           # cache written
+    df2, _ = load_transactions(x)                                 # second run: from the cache
+    pd.testing.assert_frame_equal(df, df2)
+
+
+def test_all_products_used_by_default(raw):
+    df = clean_transactions(raw)
+    small, full = build_dataset(df, 50), build_dataset(df)          # top_k=None -> every product
+    assert full.V > small.V and full.info["vocab_size"] == full.V
+    assert full.info["row_coverage"] > small.info["row_coverage"]
+
+
+def test_expected_value_does_not_just_pick_the_priciest(trained):
+    """With price sensitivity 0 the policy must still look at relevance, not only at price."""
+    b = trained
+    cfg = SimConfig(price_sensitivity=0.0)
+    ev = next(p for p in make_policies(b, cfg) if p.name == "Expected value")
+    cart = b.test[0].items[:3]
+    chance, value = ev.expected(cart)
+    assert chance.min() < cfg.p_miss                       # no flat "luck" floor any more
+    recs = ev.recommend(cart, 10, float("inf"), None)
+    priciest = set(np.argsort(-b.cat.prices)[:10].tolist())
+    assert set(recs) != priciest
+    rel_picked = np.mean([value[i] for i in recs])
+    assert rel_picked >= np.median(value)                  # picks are above-median value
