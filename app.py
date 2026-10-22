@@ -119,24 +119,20 @@ default_limit = int(min(max(round(np.quantile(cat.prices, 0.9), -3), pmin), pmax
 labels = {f"{nm(i)} · {som(cat.prices[i])}": int(i) for i in cat.pop_order[:300]}
 
 with st.form("settings"):
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2 = st.columns(2)
     n_slots = c1.slider("Suggestions shown", 1, 10, 10)
     c1.caption("Products shown at checkout (up to 10).")
     limit = c2.slider("Highest price allowed (so'm)", pmin, pmax, default_limit, step)
     no_limit = c2.checkbox("No price limit", value=False)
     c2.caption("Pricier products are never suggested.")
-    s = c3.select_slider("Price sensitivity", [0.0, 0.15, 0.4, 0.8], value=0.15,
-                         format_func=lambda v: {0.0: "None", 0.15: "Low", 0.4: "Medium", 0.8: "High"}[v])
-    c3.caption("How much a higher price lowers the chance to accept.")
-    leave = c4.select_slider("Leave risk after accepting", [0.25, 0.30, 0.45, 0.60], value=0.30,
-                             format_func=lambda v: f"{100 * v:.0f}% leave")
-    c4.caption("Share of shoppers who stop after accepting an add-on (assumption).")
     with st.expander("Fixed list products (optional)"):
         fixed_sel = st.multiselect("Shown to everyone in the 'Fixed list' model", list(labels),
                                    default=list(labels)[:10], max_selections=20)
         st.caption("Default: the 10 best sellers.")
     st.form_submit_button("Update results", type="primary")
 
+s = 0.15        # price sensitivity: Low (fixed, not in the UI)
+leave = 0.25    # leave risk after accepting: 25% (fixed, not in the UI)
 fixed_items = tuple(labels[x] for x in fixed_sel) or tuple(int(i) for i in cat.pop_order[:10])
 with st.spinner("Calibrating shopper behaviour..."):
     p_hit, p_miss, reached = calibration(ART, fixed_items)
@@ -144,12 +140,11 @@ cfg = SimConfig(n_slots=n_slots, price_limit=float("inf") if no_limit else float
                 price_sensitivity=s, p_hit=p_hit, p_miss=p_miss, stop_after_accept=leave)
 cfg_items = tuple(sorted(asdict(cfg).items()))
 
-if s > 0:
-    st.caption(f"With this price sensitivity, the price that earns the most per suggestion is "
-               f"about **{som(cat.ref / s)}**.")
-note = f" (reached {100 * reached:.0f}%)." if reached < TARGET_ACCEPT - 0.01 else "."
+note = f"Shoppers are tuned so {100 * TARGET_ACCEPT:.0f}% of them accept at least one Fixed list suggestion (default settings)"
+note += f" (reached {100 * reached:.0f}%)." if reached < TARGET_ACCEPT - 0.01 else "."
 st.caption(note + f" 80% of orders finish when nothing is accepted; after accepting, about {100 * leave:.0f}% stop, "
            "more often when the add-on is pricey for the cart (assumptions).")
+
 
 tab_cmp, tab_cart = st.tabs(["📊  Compare models", "🧺  Try a cart"])
 
