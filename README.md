@@ -3,16 +3,14 @@
 Which product recommender raises the **average order value (AOV)** of an online shop?
 Seven models are trained once, saved, and compared in a one-page Streamlit app. All money is in **so'm**.
 
-## Data (real, no synthetic data)
+Data: Bellissimo menu dataset
 
-Kaggle: [Online Retail II](https://www.kaggle.com/datasets/lakshmi25npathi/online-retail-dataset)
-(`online_retail_II.xlsx`, also on UCI). Real transactions of a UK-based online gift-ware shop,
-01/12/2009 – 09/12/2011. Many customers are wholesalers.
+The shop is a pizzeria modelled on Bellissimo (bellissimo.uz). The catalog is a 119-item menu in Uzbek with prices in so'm: 22 pizzas in 20 / 25 / 30 sm (e.g. Pepperoni (25 sm) 52 000), pitsa kruassan, snacks (Pechdan chiqqan kartoshka fri, Tovuq popperslari), drinks (Coca-Cola 1 L), salads, desserts and sauces. Pizza prices follow the website; snack, drink, salad, dessert and sauce prices are estimates (edit them in src/menu.py).
 
 | Sheet | Rows | Columns |
 |---|---|---|
-| Year 2009-2010 | 525 461 | 8 |
-| Year 2010-2011 | 541 910 | 8 |
+| Year 2019-2020 | 525 461 | 8 |
+| Year 2020-2021 | 541 910 | 8 |
 
 Columns: `Invoice` (starts with `C` = cancellation), `StockCode`, `Description`, `Quantity`,
 `InvoiceDate`, `Price` (£ per unit), `Customer ID`, `Country`. (CSV copies use `InvoiceNo` /

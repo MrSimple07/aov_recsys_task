@@ -147,8 +147,7 @@ cfg_items = tuple(sorted(asdict(cfg).items()))
 if s > 0:
     st.caption(f"With this price sensitivity, the price that earns the most per suggestion is "
                f"about **{som(cat.ref / s)}**.")
-note = f"Shoppers are tuned so {100 * TARGET_ACCEPT:.0f}% of them accept at least one Fixed list suggestion (default settings)"
-note += f" (reached {100 * reached:.0f}%)." if reached < TARGET_ACCEPT - 0.01 else "."
+note = f" (reached {100 * reached:.0f}%)." if reached < TARGET_ACCEPT - 0.01 else "."
 st.caption(note + f" 80% of orders finish when nothing is accepted; after accepting, about {100 * leave:.0f}% stop, "
            "more often when the add-on is pricey for the cart (assumptions).")
 

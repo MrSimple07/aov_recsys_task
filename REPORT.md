@@ -22,26 +22,29 @@ I also added two simple baselines (Random and Popularity) so there is something 
 
 ## 2. Dataset
 
-I took the **Online Retail II** dataset from Kaggle (originally from the UCI Machine Learning
-Repository). I used the 2009-2010 part, saved as `data/raw/online_retail_09_10.csv`.
+The dataset is a **Bellissimo menu dataset** (pizzeria, Uzbekistan, prices in so'm): 119 menu items
+with Uzbek names (pizzas in 20 / 25 / 30 sm, pitsa kruassan, snacks, drinks, salads, desserts, sauces),
+defined in `src/menu.py`. Pizza prices come from bellissimo.uz; other categories are estimates.
+Baskets come from a public transaction log (Online Retail II) whose products are mapped to menu
+items, so order sizes, timing and customer histories are real patterns. Raw transaction columns:
 
 | Column | Meaning | How I use it |
 |---|---|---|
 | `InvoiceNo` | Order ID | One invoice = one basket |
-| `StockCode` | Product ID | Item identity |
-| `Description` | Product name | Display in the UI |
+| `StockCode` | Product ID | Mapped to a menu item (item identity) |
+| `Description` | Product name | Replaced by the Uzbek menu name |
 | `Quantity` | Units bought | Cleaning (must be > 0) |
 | `InvoiceDate` | Order time | Chronological split, time features |
-| `UnitPrice` | Price per unit | Item price, AOV |
+| `UnitPrice` | Price per unit | Replaced by the menu price in so'm (used for AOV) |
 | `CustomerID` | Customer | Purchase history for the sequential model |
 | `Country` | Country | Not used |
 
 **Why this dataset:** it has baskets with several items, timestamps, customer IDs and **prices**.
-Prices are required to measure AOV. I rejected Instacart (no prices) and Olist (almost every
-order has a single item).
+Prices are required to measure AOV. Instacart (no prices) and Olist (almost every order has a
+single item) were rejected as the basket source.
 
-**Limitation:** it is data of a wholesale gift retailer, not of a mobile app. I state this
-openly in the conclusions.
+**Limitation:** the menu is Bellissimo-style, but the basket patterns come from another retailer's
+transactions, not from real Bellissimo orders. I state this openly in the conclusions.
 
 ---
 
@@ -163,7 +166,7 @@ experiment, and that the Streamlit app runs without errors.
 - Shopper behaviour is **simulated**. The absolute uplift depends on `p_hit`, `p_miss` and price
   sensitivity, so the **ranking** of the methods matters more than the exact percentages.
 - "Latent wants" are the rest of the real basket, which favours methods that capture co-purchases.
-- The dataset is a wholesale retailer, not an app.
+- Menu names and prices are Bellissimo-style (some prices estimated); basket patterns are mapped from a public transaction log, not real Bellissimo orders.
 - The bandit can choose only among the top-100 popular items, while the other two models can choose from all 500.
 - Item order **inside** an invoice follows the file order and may not be a real time order. The order **across** invoices is real.
 - A customer's history is fixed to the training period. Guests have no history.
@@ -184,7 +187,7 @@ aov-recsys/
 ├── README.md                 # Short project description
 ├── REPORT.md                 # This document
 ├── data/
-│   └── raw/                  # Put the Kaggle CSV here (any file name)
+│   └── raw/                  # Put the transaction file here (any file name)
 ├── results/                  # Output of run_experiment.py (tables and charts)
 ├── src/
 │   ├── config.py             # SimConfig: simulation assumptions
@@ -213,7 +216,7 @@ aov-recsys/
 cd aov-recsys
 pip install -r requirements.txt
 ```
-Put the Kaggle CSV into `data/raw/`. Any file name works, the first `.csv` or `.xlsx` is used.
+Put the transaction file into `data/raw/`. Any file name works, the first `.csv` or `.xlsx` is used.
 
 > Messages like `'parseString' deprecated` from matplotlib are harmless warnings from the local matplotlib installation.
 
@@ -278,7 +281,7 @@ Build a cart yourself and see what each model suggests.
 
 | Control | What it does |
 |---|---|
-| **Items in the cart** | Searchable multi-select (max 15 items), sorted by popularity, shown as `Name [code] · £price`. |
+| **Items in the cart** | Searchable multi-select (max 15 items), sorted by popularity, shown as `Name · price so'm`. |
 | **Customer** | `Guest (no history)` or a known customer ID. A known customer gives the sequential model their purchase history. |
 | **Weekday** / **Hour** | The time context, used by the bandit. |
 | **Suggestions per model** | 1 to 5 items shown per model. |
@@ -317,12 +320,3 @@ The bandit used here is pre-trained in the simulator.
 The results stay on screen until you run the simulation again.
 
 ---
-
-## 9. Conclusion (template)
-
-> Using the Online Retail II dataset, I compared association rules, a sequential Markov model and a
-> LinUCB contextual bandit in a shopper simulation. **[Best method]** achieved the highest AOV uplift
-> (**[X]%**), followed by **[...]**. The cold-start bandit needed time to learn but **[improved / stayed behind]**,
-> while the pre-trained bandit **[...]**. The ranking **[stayed / changed]** under the sensitivity analysis.
-> Since the shopper behaviour is simulated, the results show the relative strength of the methods
-> rather than guaranteed real-world gains, and the next step would be an A/B test in a real app.
