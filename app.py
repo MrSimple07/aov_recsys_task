@@ -315,9 +315,12 @@ with tab_cart:
                 "Why shown": why,
                 "Chance (%)": 100 * chance,
                 "Price penalty (%)": 100 * (1 - pen),
-                "Exp. add (score)": add,
+
                 "Order grows (%)": 100 * add / B,
-                "Leave risk (%)": leave_if})
+                "Leave risk (%)": leave_if,
+                "Exp. add (score)": add,
+                
+                })
             st.dataframe(df.style.format({
                 "Price (so'm)": lambda v: fmt(v), "Chance (%)": "{:.1f}%",
                 "Price penalty (%)": "{:.0f}%", "Exp. add (so'm)": lambda v: fmt(v),
