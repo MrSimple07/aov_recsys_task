@@ -354,22 +354,3 @@ with tab_cart:
                                     props=f"background-color:{ACCENT};color:#ffffff;font-weight:600"),
                      hide_index=True, **STRETCH)
         st.caption("One cart gives noisy results; the Compare tab averages over many real orders.")
-
-with st.expander("About the data and models"):
-    used = "all" if not meta.get("top_k") else f"top {meta['top_k']}"
-    st.write(f"**{meta['orders']:,} orders** ({meta['rows']:,} line items), {meta['products_total']:,} products "
-             f"({used} used, covering {100 * meta.get('row_coverage', 1):.0f}% of purchased items), "
-             f"{meta['date_min']} → {meta['date_max']}. Models learned from {meta['n_train']:,} orders and "
-             f"are tested on {meta['n_test']:,} later orders (from {meta['test_start']}).")
-    if meta.get("source_currency") == "GBP":
-        st.write(f"**Data:** Online Retail II, a UK online gift-ware shop (many wholesale customers). Prices "
-                 f"were converted from £ at {meta['fx_to_som']:,.0f} so'm per £1, then rescaled by {b.prep['scale']:.2f} "
-                 f"so a typical cart (about 3 products) is worth {TARGET_AOV:,.0f} so'm. Only small orders "
-                 f"(4-8 products, {100 * b.prep['share']:.0f}% of orders, {b.prep['n_test']:,} in the test period) are replayed, "
-                 "because the raw data is wholesale with huge baskets.")
-    if meta.get("menu"):
-        st.write("**Data:** real basket structure of Online Retail II, with every product renamed to a Bellissimo-style menu item \n"
-                 "(Uzbek names, so'm prices from bellissimo.uz; snack, drink, salad, dessert and sauce prices are estimates).")
-    st.write(f"Trained {meta['created']} in {meta['train_seconds']}s.")
-    st.caption("Accepting, removing and stopping are simulated assumptions (no real accept/reject logs), "
-               "so results compare models under stated assumptions - they are not real-world gains.")

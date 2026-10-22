@@ -18,6 +18,10 @@ from .models import (FixedListPolicy, FrequentlyBoughtTogether, LinUCBPolicy, Ra
 
 FILLER = "Popular filler (no signal for this cart)"
 
+def _is(pol, cls) -> bool:
+    """isinstance by class NAME, so a Streamlit hot-reload of models.py cannot blank the column."""
+    return any(c.__name__ == cls.__name__ for c in type(pol).__mro__)
+
 
 def _short(cat, i: int, width: int = 30) -> str:
     n = " ".join(cat.label(int(i)).split()).replace(" ,", ",")
@@ -43,7 +47,7 @@ def why_shown(pol, cat, cart, recs, ctx=None, customer: int = -1) -> list:
     if not recs:
         return []
 
-    if isinstance(pol, FrequentlyBoughtTogether):
+    if _is(pol, FrequentlyBoughtTogether):
         conf = pol.rules.conf[cart][:, recs].toarray()
         out = []
         for k, j in enumerate(recs):
@@ -56,7 +60,7 @@ def why_shown(pol, cat, cart, recs, ctx=None, customer: int = -1) -> list:
             out.append(f"With {_short(cat, cart[d], 24)}: {100 * col[d]:.0f}% of orders ({lift:.1f}×)")
         return out
 
-    if isinstance(pol, SequentialPolicy):
+    if _is(pol, SequentialPolicy):
         seq, contrib = sequential_contributions(pol, cart, customer, recs)
         n_past = len(seq) - min(len(cart), len(seq))
         out = []
@@ -70,7 +74,7 @@ def why_shown(pol, cat, cart, recs, ctx=None, customer: int = -1) -> list:
                 out.append(f"After {_short(cat, seq[d], 24)} ({src})")
         return out
 
-    if isinstance(pol, LinUCBPolicy):
+    if _is(pol, LinUCBPolicy):
         if ctx is None or ctx.vec is None:
             return ["Bandit needs a context"] * len(recs)
         x = ctx.vec
@@ -86,12 +90,12 @@ def why_shown(pol, cat, cart, recs, ctx=None, customer: int = -1) -> list:
             out.append(f"Learned reward {est:.3f} + exploration {bonus:.3f}")
         return out
 
-    if isinstance(pol, FixedListPolicy):
+    if _is(pol, FixedListPolicy):
         slot = {int(i): k + 1 for k, i in enumerate(pol.items)}
         return [f"Fixed list, slot {slot[j]}" if j in slot else "Best seller (fills the list)"
                 for j in recs]
 
-    if isinstance(pol, RandomPolicy):
+    if _is(pol, RandomPolicy):
         return ["Random pick"] * len(recs)
 
     return [""] * len(recs)
