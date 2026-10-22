@@ -28,7 +28,8 @@ MISS_RATIO = 0.0001
 # Demo assumption: the monthly business value of the best model should land in this range (so'm).
 MONTH_VALUE_RANGE = (1_000_000, 2_000_000)
 
-
+ORDERS_PER_MONTH = 150_000      # 150 ming orders per month
+AVG_ORDER_SOM = 120_000         # 120 ming so'm average order -> 18 mlrd so'm revenue per month
 
 def som(x: float) -> str:
     """Format a number as so'm with space-separated thousands: 1 234 500 so'm."""

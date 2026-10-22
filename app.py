@@ -18,7 +18,7 @@ from src.experiment import calibrate_accept, calibrate_relevance, prepare_bundle
 from src.models import Ctx, accept_prob, relevance
 from src.simulator import _subsample, build_sessions, run_policy, simulate_cart
 from src.config import MONTH_VALUE_RANGE, TARGET_ACCEPT, TARGET_AOV, SimConfig, som
-
+from src.config import AVG_ORDER_SOM, ORDERS_PER_MONTH, TARGET_ACCEPT, TARGET_AOV, SimConfig, som
 
 import pandas as pd
 
@@ -159,10 +159,9 @@ with tab_cmp:
         summary, bands = simulate(ART, cfg_items, fixed_items)
     months = max((pd.Timestamp(meta["date_max"]) - pd.Timestamp(meta["date_min"])).days / 30.44, 1.0)
     orders_est = meta["orders"] * b.prep["share"] / months       # orders of the simulated size
-    orders_pm = int(round(orders_est)) 
-    summary["month_extra"] = orders_pm * (summary["RPS_policy"] - summary["RPS_base"])
-    month_rev0 = orders_pm * float(summary["RPS_base"].iloc[0])
-
+    orders_pm = ORDERS_PER_MONTH                                  # 150 000 orders / month
+    month_rev0 = orders_pm * AVG_ORDER_SOM                         # 18 000 000 000 so'm / month
+    summary["month_extra"] = month_rev0 * summary["RPS_uplift_pct"] / 100   # extra revenue = revenue x uplift %
     aov0 = float(summary["AOV_base"].iloc[0])
     best = summary.loc[summary["AOV_uplift_pct"].idxmax()]
     m1, m2, m4, m3 = st.columns(4)
@@ -196,13 +195,12 @@ with tab_cmp:
         "Change (so'm)": summary["extra_per_order"],
         "Change (%)": summary["AOV_uplift_pct"],
         "Accept (%)": 100 * summary["orders_with_accept"],
-        "Items added (%)": summary["items_added_pct"],
         "Completed (%)": 100 * summary["finish_rate"],
         "Extra revenue / month (so'm)": summary["month_extra"],
         "Monthly revenue (%)": summary["RPS_uplift_pct"]})
     sty = (tbl.style.format({"AOV (so'm)": lambda v: fmt(v), "Change (so'm)": lambda v: fmt(v, True),
                              "Change (%)": "{:+.1f}%", "Accept (%)": "{:.1f}%",
-                             "Items added (%)": "+{:.1f}%", "Completed (%)": "{:.1f}%",
+                              "Completed (%)": "{:.1f}%",
                              "Extra revenue / month (so'm)": lambda v: fmt(v, True),
                              "Monthly revenue (%)": "{:+.1f}%"})
            .highlight_max(subset=["AOV (so'm)", "Change (so'm)", "Change (%)",
@@ -212,10 +210,10 @@ with tab_cmp:
                  column_config={"Model": st.column_config.TextColumn(width="medium"),
                                 "What it does": st.column_config.TextColumn(width="medium")})
     st.caption("**AOV** = average value of finished orders, with suggestions; **Change** = vs no suggestions. "
-               "**Accept** = share of shoppers who accept at least one suggestion. **Items added** = accepted and kept, "
-               "as % of the products already in the cart. **Completed** = share of started orders that finish; it falls "
+               "**Accept** = share of shoppers who accept at least one suggestion. "
+               "**Completed** = share of started orders that finish; it falls "
                "when accepted add-ons scare shoppers away. **Business value** = extra revenue per month and its share "
-               f"of monthly revenue ({fmt(month_rev0)} so'm without suggestions at {orders_pm:,} orders). Revenue "
+               f"of monthly revenue (around {fmt(month_rev0)} so'm without suggestions at {orders_pm:,} orders). Revenue "
                "counts every started order, so it can grow less than AOV, or fall. Green = best. Random is the noise floor.")
     st.download_button("Download table (CSV)", summary.to_csv(index=False), "model_comparison.csv")
 
@@ -347,12 +345,11 @@ with tab_cart:
                          "AOV with suggestions (so'm)": sm["aov_after"],
                          "AOV change (%)": sm["aov_change_pct"],
                          "Shoppers who accept (%)": 100 * sm["accept_share"],
-                         "Items added (%)": sm["items_added_pct"],
                          "Orders completed (%)": 100 * sm["finish_rate"]})
         allm = pd.DataFrame(rows)
         st.dataframe(allm.style.format({"AOV with suggestions (so'm)": lambda v: fmt(v),
                                         "AOV change (%)": "{:+.1f}%", "Shoppers who accept (%)": "{:.0f}%",
-                                        "Items added (%)": "+{:.0f}%", "Orders completed (%)": "{:.1f}%"})
+                                        "Orders completed (%)": "{:.1f}%"})
                      .highlight_max(subset=["AOV change (%)"],
                                     props=f"background-color:{ACCENT};color:#ffffff;font-weight:600"),
                      hide_index=True, **STRETCH)
