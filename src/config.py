@@ -24,7 +24,7 @@ TARGET_ACCEPT = 0.24
 # (obscure products are scaled down further, see Catalog.impulse). 0.10 gives: random products
 # accepted by ~2% of shoppers, the Fixed list by 24%. This is an assumption and it matters: the
 # higher it is, the more of the Fixed list's 24% is impulse and the less the smarter models gain.
-MISS_RATIO = 0.10
+MISS_RATIO = 0.0001
 # Demo assumption: the monthly business value of the best model should land in this range (so'm).
 MONTH_VALUE_RANGE = (1_000_000, 2_000_000)
 
