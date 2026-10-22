@@ -1,6 +1,6 @@
 # AOV recommender lab
 
-Which product recommender raises the **order value** and the **real revenue** of an online shop?
+Which product recommender raises the **average order value (AOV)** of an online shop?
 Seven models are trained once, saved, and compared in a one-page Streamlit app. All money is in **so'm**.
 
 ## Data (real, no synthetic data)
@@ -32,7 +32,7 @@ pip install -r requirements.txt
 python train.py                 # reads data/raw/*, merges, trains ONCE, saves to artifacts/
 streamlit run app.py            # the app only loads the saved models (seconds)
 python run_experiment.py        # same comparison from the command line -> results/
-pytest                          # 21 tests (use a tiny fake file, not your data)
+pytest                          # 26 tests (use a tiny fake file, not your data)
 ```
 
 The first `train.py` run reads the Excel file (slow: about 7 s per 100 000 rows in my test, so
@@ -67,10 +67,14 @@ Every model returns at most 10 items: cart items removed, items above the price 
 The data has no accept/reject logs, so shoppers are simulated. Half of a real test order is the
 cart; the model suggests; the shopper accepts (wanted items more often, less often when pricey,
 less often in lower positions), may remove items again, and then finishes or stops: **80% finish
-when nothing is accepted; after accepting, about 30% stop**, more often when the add-on is
-expensive relative to the cart. The app shows, per model: average order with suggestions, the
-amount and % added, **real revenue change** (counts shoppers who left), acceptance, completion,
-value per suggestion, and conversion by price band. Time-ordered split: the models learn from the
+when nothing is accepted; after accepting, about 30% stop** (adjustable in the app: "Leave risk after accepting"), more often when the add-on is
+expensive relative to the cart. The app is AOV-first. Per model it shows: AOV with suggestions, AOV change (so'm and %),
+shoppers who accept at least one suggestion, items added per order, share of suggestions the shopper
+wanted, and orders completed. Revenue per started order is kept in a secondary "Revenue check"
+expander, because AOV only counts finished orders while revenue also counts shoppers who left.
+The shopper rules are calibrated so that **24% of shoppers accept at least one Fixed list
+suggestion** (default settings); a per-suggestion 24% is unreachable with 10 slots and position decay.
+Time-ordered split: the models learn from the
 older 70% of orders and are tested on the newer 30%.
 
 ## Layout
@@ -78,14 +82,15 @@ older 70% of orders and are tested on the newer 30%.
 ```
 check_install.py      detects old / mixed project files
 train.py              train once -> artifacts/
-app.py                Streamlit app (compare models + try a cart)
+app.py                Streamlit app (Compare models + Try a cart; AOV first)
 run_experiment.py     the same comparison from the command line
 src/data.py           load Excel/CSV/Parquet, merge, clean, baskets, time split, so'm prices
 src/models.py         the seven models
-src/simulator.py      suggest -> accept -> remove -> finish or stop
+src/simulator.py      suggest -> accept -> remove -> finish or stop (+ single-cart replay)
+src/explain.py        "why shown" text per model for the cart table
 src/artifacts.py      save / load (csv + npz + json, no pickle)
 src/training.py       fit + save
-tests/                21 tests (tests/fake_data.py is a tiny fixture, never used for training)
+tests/                26 tests (tests/fake_data.py is a tiny fixture, never used for training)
 ```
 
 ## Limits to keep in mind

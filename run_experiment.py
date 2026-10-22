@@ -41,9 +41,8 @@ def main():
           f"{'none' if a.price_limit == float('inf') else som(a.price_limit)} | s={a.s}")
     for _, r in summary.iterrows():
         print(f"{r.policy:28s} AOV {som(r.AOV_base)} -> {som(r.AOV_policy)} "
-              f"({r.AOV_uplift_pct:+.1f}%) | revenue/started order {r.RPS_uplift_pct:+.1f}% "
-              f"| +{som(r.extra_per_1000_started)} per 1000 started | conv {100 * r.conversion:.1f}% "
-              f"| finish {100 * r.finish_rate:.1f}%")
+              f"({r.AOV_uplift_pct:+.1f}%) | accept {100 * r.orders_with_accept:.1f}% "
+              f"| finish {100 * r.finish_rate:.1f}% | revenue/started order {r.RPS_uplift_pct:+.1f}%")
     print(f"Saved to {out}/")
 
 

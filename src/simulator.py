@@ -56,7 +56,7 @@ def _accept_stage(recs, ss: Session, cat: Catalog, cfg: SimConfig, bands=None):
         hit = it in ss.hidden
         hits += hit
         price = cat.prices[it]
-        p = (cfg.p_hit if hit else cfg.p_miss) * np.exp(-cfg.price_sensitivity * price / cat.ref)
+        p = (cfg.p_hit if hit else cfg.p_miss * cat.impulse[it]) * np.exp(-cfg.price_sensitivity * price / cat.ref)
         if cfg.position_bias:
             p /= np.log2(j + 2)
         b = cat.band[it]
@@ -123,8 +123,54 @@ def run_policy(policy, sessions, cat: Catalog, cfg: SimConfig, slope: float):
         conversion=acc_n / max(shown, 1), orders_with_accept=any_acc.mean(),
         kept_share=kept_n / max(acc_n, 1), value_per_suggestion=added.sum() / max(shown, 1),
         finish_rate=finished.mean(), finish_rate_base=fin0.mean(),
+        finish_rate_accepters=float(finished[any_acc].mean()) if any_acc.any() else float("nan"),
+        items_added_per_order=kept_n / n,
+        items_added_pct=100 * kept_n / max(sum(len(s.cart) for s in sessions), 1),
         relevance_rate=hits / max(shown, 1), n_orders=n)
     return metrics, bands
+
+
+def simulate_cart(cat: Catalog, rel: np.ndarray, cart, shown, cfg: SimConfig, slope: float,
+                  n: int = 4000, seed: int = 0) -> dict:
+    """Replay ONE cart many times with the same shopper rules as the big simulation.
+
+    `shown` is the list exactly as the shopper sees it (best pick first, so position matters).
+    `rel[j]` = chance the shopper really wants product j (the stand-in for the hidden half of a
+    real order). Same seed -> same numbers, so the page does not jitter on every click.
+    -> dict: AOV before/after (finished orders only), change, shoppers who accept, completed %."""
+    cart = np.asarray(cart, dtype=int)
+    shown = [int(i) for i in shown][:MAX_SLOTS]
+    B = float(cat.prices[cart].sum())
+    out = dict(aov_before=B, aov_after=B, aov_change=0.0, aov_change_pct=0.0, accept_share=0.0,
+               finish_rate=cfg.finish_base, finish_rate_base=cfg.finish_base,
+               items_added=0.0, items_added_pct=0.0, revenue_change_pct=0.0)
+    if not shown:
+        return out
+    rng = np.random.default_rng(seed)
+    m = len(shown)
+    price = cat.prices[shown]
+    want = rng.random((n, m)) < rel[shown]
+    p = np.where(want, cfg.p_hit, cfg.p_miss * cat.impulse[shown]) * np.exp(-cfg.price_sensitivity * price / cat.ref)
+    if cfg.position_bias:
+        p = p / np.log2(np.arange(m) + 2)
+    acc = rng.random((n, m)) < p
+    gone = rng.random((n, m)) < np.where(want, cfg.remove_hit, cfg.remove_miss)
+    kept = acc & ~gone
+    add = (kept * price).sum(axis=1)
+    any_acc = acc.any(axis=1)
+    stop = np.minimum(cfg.max_stop, (1 - cfg.finish_base) + slope * add / B)
+    p_fin = np.where(any_acc, 1 - stop, cfg.finish_base)
+    u = rng.random(n)
+    fin, fin0 = u < p_fin, u < cfg.finish_base
+    if not fin.any() or not fin0.any():
+        return out
+    aov1 = float((B + add)[fin].mean())
+    out.update(aov_after=aov1, aov_change=aov1 - B, aov_change_pct=100 * (aov1 / B - 1),
+               accept_share=float(any_acc.mean()), finish_rate=float(fin.mean()),
+               finish_rate_base=float(fin0.mean()), items_added=float(kept.sum(axis=1).mean()),
+               items_added_pct=100 * float(kept.sum(axis=1).mean()) / len(cart),
+               revenue_change_pct=100 * (((B + add) * fin).mean() / (B * fin0.mean()) - 1))
+    return out
 
 
 def _subsample(items, k: int, seed: int = 0):

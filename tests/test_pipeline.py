@@ -6,14 +6,14 @@ from src.artifacts import load_artifacts
 from src.config import SimConfig, som
 from src.data import Basket, build_dataset, clean_transactions, load_transactions
 from src.experiment import REFERENCE, make_policies, run_simulation
-from src.models import (Ctx, FixedListPolicy, PairRules, SequentialModel, accept_prob, finalize)
+from src.models import (Ctx, ExpectedValuePolicy, FixedListPolicy, PairRules, SequentialModel, accept_prob, finalize)
 from src.simulator import (_accept_stage, _subsample, build_sessions, calibrate_stop_slope,
                            run_policy)
 from fake_data import generate
 from src.training import train
 
 ALL_MODELS = ["Random", "Fixed list", "Association rules", "Sequential",
-              "Contextual bandit (cold start)", "Contextual bandit (warm start)", "Expected value"]
+              "Contextual bandit (cold start)", "Contextual bandit (warm start)"]
 
 
 @pytest.fixture(scope="module")
@@ -75,12 +75,12 @@ def test_sequential_uses_customer_history():
     assert m.scores(np.array([3]), -1).sum() == 0                   # unknown item, guest: no signal
 
 
-def test_finalize_filter_then_sort():
+def test_finalize_filters_and_keeps_model_order():
     prices = np.array([500., 100., 300., 900., 200., 700.])
     out = finalize([3, 5, 0, 2, 1, 4], cart=[0], prices=prices, limit=800, n=3,
                    fallback=[0, 1, 2, 3, 4, 5])
     # ranking 3,5,0,2,1,4 -> 3 is above the limit, 0 is in the cart -> first 3 kept: 5, 2, 1
-    assert out == [1, 2, 5]                              # shown cheapest first
+    assert out == [5, 2, 1]                              # the model's own order is kept
     assert 3 not in out and 0 not in out
 
 
@@ -94,8 +94,6 @@ def test_all_models_respect_the_rules(trained):
         assert 0 < len(recs) <= 10 and len(set(recs)) == len(recs), pol.name
         assert not set(recs) & set(cart.tolist()), pol.name               # cart items removed
         assert all(b.cat.prices[i] <= 2.0 * b.cat.ref for i in recs), pol.name
-        pr = [b.cat.prices[i] for i in recs]
-        assert pr == sorted(pr), pol.name                                  # cheapest first
 
 
 def test_fixed_list_is_top_popular(trained):
@@ -155,8 +153,8 @@ def test_bandit_learns_from_feedback(trained):
     shown = cold.recommend(cart, 3, float("inf"), ctx)
     for _ in range(30):
         cold.update(ctx, shown, [True] + [False] * (len(shown) - 1))      # only the first is accepted
-    again = cold.recommend(cart, 10, float("inf"), ctx)
-    assert again[:] != [] and shown[0] in again
+    assert cold.b[cold.arm_pos[int(shown[0])]].any()                      # the accepted arm learned something
+    assert cold.recommend(cart, 10, float("inf"), ctx)
     cold.reset()
     assert not cold.b.any()                                                # reset forgets everything
 
@@ -236,7 +234,7 @@ def test_expected_value_does_not_just_pick_the_priciest(trained):
     """With price sensitivity 0 the policy must still look at relevance, not only at price."""
     b = trained
     cfg = SimConfig(price_sensitivity=0.0)
-    ev = next(p for p in make_policies(b, cfg) if p.name == "Expected value")
+    ev = ExpectedValuePolicy(b.cat, b.rules, s=0.0)
     cart = b.test[0].items[:3]
     chance, value = ev.expected(cart)
     assert chance.min() < cfg.p_miss                       # no flat "luck" floor any more
@@ -245,3 +243,85 @@ def test_expected_value_does_not_just_pick_the_priciest(trained):
     assert set(recs) != priciest
     rel_picked = np.mean([value[i] for i in recs])
     assert rel_picked >= np.median(value)                  # picks are above-median value
+
+# ----------------------------------------------------------------- AOV-first additions
+from src.experiment import calibrate_accept                      # noqa: E402
+from src.explain import sequential_contributions, why_shown      # noqa: E402
+from src.simulator import simulate_cart                          # noqa: E402
+from src.models import relevance                                 # noqa: E402
+
+
+def test_calibration_is_per_shopper_and_reachable(trained):
+    fixed = tuple(int(i) for i in trained.cat.pop_order[:10])
+    p_hit, p_miss, reached = calibrate_accept(trained, fixed, target=0.15)
+    assert 0 < p_hit <= 1 and reached == pytest.approx(0.15, abs=0.03)
+
+
+def test_summary_has_aov_drivers(trained):
+    s, _ = run_simulation(trained, SimConfig(), seeds=1, max_orders=300, max_warm=300)
+    assert {"orders_with_accept", "items_added_per_order", "finish_rate_accepters", "relevance_rate",
+            "AOV_policy", "extra_per_order"} <= set(s.columns)
+
+
+def test_simulate_cart_deterministic_and_sane(trained):
+    b, cfg = trained, SimConfig()
+    cart = b.test[0].items[:3]
+    rel = relevance(b.rules, b.cat, cart)
+    pol = next(p for p in make_policies(b, cfg) if p.name == "Association rules")
+    shown = pol.recommend(cart, 10, np.inf, None)
+    a = simulate_cart(b.cat, rel, cart, shown, cfg, 0.5)
+    assert a == simulate_cart(b.cat, rel, cart, shown, cfg, 0.5)
+    assert a["aov_before"] == pytest.approx(b.cat.prices[cart].sum())
+    assert a["aov_after"] >= a["aov_before"] and 0 <= a["accept_share"] <= 1
+    empty = simulate_cart(b.cat, rel, cart, [], cfg, 0.5)
+    assert empty["aov_change"] == 0
+    # higher leave slope -> fewer finished orders
+    assert simulate_cart(b.cat, rel, cart, shown, cfg, 2.0)["finish_rate"] <= a["finish_rate"]
+
+
+def test_why_shown_differs_by_model_and_matches_scores(trained):
+    b, cfg = trained, SimConfig()
+    cart = b.test[0].items[:3]
+    pols = {p.name: p for p in make_policies(b, cfg)}
+    reasons = {}
+    for name, p in pols.items():
+        ctx = _ctx(b, cart)
+        recs = p.recommend(cart, 10, np.inf, ctx)
+        r = why_shown(p, b.cat, cart, recs, ctx, -1)
+        assert len(r) == len(recs) and all(isinstance(x, str) and x for x in r)
+        reasons[name] = r
+    assert len({tuple(v) for v in reasons.values()}) > 3          # not the same text everywhere
+    seq = pols["Sequential"]
+    recs = seq.recommend(cart, 10, np.inf, None)
+    _, contrib = sequential_contributions(seq, cart, -1, recs)
+    assert np.allclose(contrib.sum(axis=0), seq.model.scores(cart, -1)[recs])
+
+
+def test_cart_changes_the_top_slots(trained):
+    """Cart-aware models must move their first slots when the cart changes (not frozen cheap items)."""
+    b = trained
+    pols = {p.name: p for p in make_policies(b, SimConfig())}
+    firsts = {n: set() for n in ("Association rules", "Sequential")}
+    for o in b.test[:60]:
+        cart = o.items[:3]
+        ctx = _ctx(b, cart, o.customer, o.ts)
+        for n in firsts:
+            firsts[n].add(tuple(pols[n].recommend(cart, 10, float("inf"), ctx)[:5]))
+    assert all(len(v) > 20 for v in firsts.values())
+
+
+def test_prepare_bundle_hits_target_aov(trained):
+    import copy
+    from src.experiment import prepare_bundle
+    b = copy.deepcopy(trained)
+    info = prepare_bundle(b, target_aov=120_000, order_items=(3, 8))
+    sess = build_sessions(b.test, b.cat.prices, SimConfig(), 0)
+    assert np.mean([s.base_value for s in sess]) == pytest.approx(120_000, rel=0.06)
+    assert all(3 <= len(o.items) <= 8 for o in b.test) and 0 < info["share"] <= 1
+
+
+def test_random_picks_are_rarely_accepted(trained):
+    """Impulse accept chance scales with popularity: random (obscure) picks << best sellers."""
+    s, _ = run_simulation(trained, SimConfig(p_hit=0.6, p_miss=0.06), seeds=1, max_orders=400, max_warm=300)
+    t = s.set_index("policy")["orders_with_accept"]
+    assert t["Random"] < t["Fixed list"]

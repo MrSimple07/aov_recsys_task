@@ -16,7 +16,7 @@ from .models import PairRules, SequentialModel, fit_embeddings
 
 def train(df: pd.DataFrame, out="artifacts", top_k: int | None = None, train_frac: float = 0.7,
           fx: float = 1.0, currency: str = "GBP", min_count: int | None = None,
-          min_conf: float = 0.05, files=()) -> dict:
+          min_conf: float = 0.05, files=(), menu: bool = False) -> dict:
     t0 = time.time()
     ds = build_dataset(df, top_k=top_k, train_frac=train_frac, fx=fx, round_to=ROUND_TO)
     print(f"  dataset: {ds.V:,} products covering {100 * ds.info['row_coverage']:.0f}% of purchased "
@@ -35,7 +35,7 @@ def train(df: pd.DataFrame, out="artifacts", top_k: int | None = None, train_fra
     warm = even_subsample(ds.train, 5000)
     meta = dict(
         created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        source_currency=currency, fx_to_som=fx, price_unit="so'm",
+        source_currency=currency, fx_to_som=fx, menu=menu, price_unit="so'm",
         files=[f"{getattr(f, 'name', f)}" for f in files],
         top_k=top_k, train_frac=train_frac, min_count=mc, min_conf=min_conf,
         n_rules=rules.n_rules, train_seconds=round(time.time() - t0, 1),

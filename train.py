@@ -10,6 +10,7 @@ import time
 
 from src.config import FX_GBP_UZS, SOURCE_CURRENCY
 from src.data import load_transactions
+from src.menu import apply_menu
 from src.training import train
 
 
@@ -36,8 +37,10 @@ def main():
     df, files = load_transactions(
         a.data, since=a.since, item_regex=None if a.no_item_filter else r"^\d{5}",
         cancel_prefix=None if a.no_cancel_filter else "C")
-    print(f"Training (prices x {fx:,.0f} -> so'm) ...")
-    train(df, a.out, top_k=a.top_k, train_frac=a.train_frac, fx=fx, currency=a.currency,
+    df = apply_menu(df)                      # gift-shop products -> Bellissimo menu (Uzbek, so'm)
+    fx, a.currency = 1.0, "UZS"             # menu prices are already in so'm
+    print("Training on the Bellissimo menu (prices in so'm) ...")
+    train(df, a.out, top_k=a.top_k, train_frac=a.train_frac, fx=fx, currency=a.currency, menu=True,
           min_count=a.min_count, files=files)
     print(f"Done in {time.time() - t:.0f}s. Next: streamlit run app.py")
 

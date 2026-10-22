@@ -25,10 +25,12 @@ def test_app_runs_and_simulates(art):
     at = AppTest.from_file(APP, default_timeout=180).run()
     assert not at.exception
     assert any("so'm" in str(m.value) for m in at.metric)          # headline metrics
-    assert len(at.dataframe) >= 2                                  # models table + cart table
+    assert len(at.dataframe) >= 3                                  # models + revenue check + cart tables
     table = at.dataframe[0].value
-    assert len(table) == 7                                         # every model is listed
-    assert "Added to order (%)" in table.columns and "Real revenue change (%)" in table.columns
+    assert len(table) == 6                                         # every model is listed
+    assert {"AOV (so'm)", "Change (%)", "Accept (%)", "Completed (%)"} <= set(table.columns)
+    assert not {"± (%)", "Real revenue change (%)"} & set(table.columns)   # revenue is not in the main table
+    assert [tab.label for tab in at.tabs][0].strip().endswith("Compare models")
 
 
 def test_app_without_models(tmp_path):

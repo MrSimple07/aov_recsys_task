@@ -18,7 +18,17 @@ from itertools import chain
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix, diags
 from scipy.sparse.linalg import svds
+import re
+import pandas as pd
 
+_SIZE = re.compile(r"\(.*?\)|\b\d+(?:[.,]\d+)?\s*(?:l|ml|sm|ta)\b", re.I)
+
+
+def product_family(names, ids) -> np.ndarray:
+    """Same product in another size / volume / count -> same family id.
+    'Coca-Cola 0.5 L', 'Coca-Cola 1.5 L' -> one family; 'Pepperoni (25 sm)', 'Pepperoni (30 sm)' -> one."""
+    keys = [" ".join(_SIZE.sub(" ", (n or i)).lower().split()) or str(i) for n, i in zip(names, ids)]
+    return pd.factorize(pd.Series(keys))[0]
 
 # ----------------------------------------------------------------------------- catalog
 @dataclass
@@ -35,17 +45,28 @@ class Catalog:
         self.ref = float(np.median(self.prices))                 # "typical" price
         self.pop_order = np.argsort(-self.train_counts, kind="stable")
         self.pop_share = self.train_counts / max(self.n_train, 1)  # P(item is in an order)
+        # impulse appeal in [0, 1]: best sellers are bought on impulse far more than obscure items
+        ref_pop = self.pop_share[self.pop_order[min(9, len(self.pop_order) - 1)]]
+        self.impulse = np.clip(self.pop_share / max(ref_pop, 1e-12), 0.0, 1.0)
         self.band_edges = np.quantile(self.prices, [0.25, 0.5, 0.75])
         self.band = np.searchsorted(self.band_edges, self.prices, side="right")
+        self.family = product_family(self.names, self.item_ids)
+
 
     def label(self, i: int) -> str:
-        return (self.names[i] or self.item_ids[i]).strip().title()
+        return (self.names[i] or self.item_ids[i]).strip()   # menu names are already cased
 
     def band_labels(self) -> list:
         edges = [self.prices.min(), *self.band_edges, self.prices.max()]
         f = lambda x: f"{x:,.0f}".replace(",", " ")  # noqa: E731
         return [f"{k + 1}. {f(edges[k])}-{f(edges[k + 1])}" for k in range(4)]
 
+    def rescale(self, k: float, round_to: int = 10):
+        """Divide every price by k (done once when the app loads)."""
+        self.prices = np.maximum(np.round(self.prices / k / round_to) * round_to, round_to)
+        self.ref = float(np.median(self.prices))
+        self.band_edges = np.quantile(self.prices, [0.25, 0.5, 0.75])
+        self.band = np.searchsorted(self.band_edges, self.prices, side="right")
 
 # ------------------------------------------------------------- frequently bought together
 class PairRules:
@@ -107,20 +128,22 @@ def accept_prob(rel, price, ref, p_hit, p_miss, s):
     return (rel * p_hit + (1.0 - rel) * p_miss) * np.exp(-s * np.asarray(price) / ref)
 
 
-def finalize(ranked, cart, prices, limit, n, fallback) -> list:
-    """Filter first, then sort: drop cart items + items above the price limit, take the
-    first n of the ranking (popular items fill gaps), show CHEAPEST FIRST."""
+def finalize(ranked, cart, prices, limit, n, fallback, family=None) -> list:
     banned = set(int(i) for i in cart)
+    fam_banned = set() if family is None else {int(family[i]) for i in banned}
     out: list = []
     for i in chain(ranked, fallback):
         i = int(i)
         if i in banned or prices[i] > limit:
             continue
+        if family is not None and int(family[i]) in fam_banned:   # Cola 1.5 L in cart -> no Cola 0.5 / 1 L
+            continue
         out.append(i)
         banned.add(i)
+        if family is not None:
+            fam_banned.add(int(family[i]))                         # only one size per product in the list
         if len(out) >= n:
             break
-    out.sort(key=lambda i: prices[i])          # stable: equal prices keep rank order
     return out
 
 
@@ -152,8 +175,7 @@ class FixedListPolicy(_Stateless):
         self.items = [int(i) for i in (items if items is not None else cat.pop_order[:size])]
 
     def recommend(self, cart, n: int, limit: float = float("inf"), ctx=None) -> list:
-        return finalize(self.items, cart, self.cat.prices, limit, n, self.cat.pop_order)
-
+        return finalize(self.items, cart, self.cat.prices, limit, n, self.cat.pop_order, self.cat.family)
 
 class FrequentlyBoughtTogether(_Stateless):
     name = "Association rules"
@@ -166,7 +188,7 @@ class FrequentlyBoughtTogether(_Stateless):
         sc = self.rules.scores(cart)
         pos = np.flatnonzero(sc > 0)
         ranked = pos[np.argsort(-sc[pos], kind="stable")][:300]
-        return finalize(ranked, cart, self.cat.prices, limit, n, self.cat.pop_order)
+        return finalize(ranked, cart, self.cat.prices, limit, n, self.cat.pop_order, self.cat.family)
 
     
 class ExpectedValuePolicy(_Stateless):
@@ -209,7 +231,7 @@ class ExpectedValuePolicy(_Stateless):
     def recommend(self, cart, n: int, limit: float = float("inf"), ctx=None) -> list:
         _, ev = self.expected(cart)
         ranked = np.argsort(-ev, kind="stable")[:300]
-        return finalize(ranked, cart, self.cat.prices, limit, n, self.cat.pop_order)
+        return finalize(ranked, cart, self.cat.prices, limit, n, self.cat.pop_order, self.cat.family)
 
 
 class RandomPolicy(_Stateless):
@@ -337,6 +359,7 @@ class LinUCBPolicy:
         M, d = len(self.arms), self.ctxb.dim
         self.A_inv = np.tile(np.eye(d) / self.l2, (M, 1, 1))
         self.b = np.zeros((M, d))
+        self.rng = np.random.default_rng(seed)
 
     def recommend(self, cart, n: int, limit: float = float("inf"), ctx=None) -> list:
         if ctx is None or ctx.vec is None:
@@ -345,6 +368,9 @@ class LinUCBPolicy:
         theta = np.einsum("mij,mj->mi", self.A_inv, self.b)
         Ax = self.A_inv @ x
         ucb = theta @ x + self.alpha * np.sqrt(np.maximum(Ax @ x, 0))
+        if not hasattr(self, "rng"):
+            self.rng = np.random.default_rng(0)
+        ucb = ucb + self.rng.random(len(ucb)) * 1e-6      # breaks ties; real scores win once it has learned
         ucb[np.isin(self.arms, cart)] = -np.inf
         ranked = self.arms[np.argsort(-ucb, kind="stable")]
         return finalize(ranked, cart, self.cat.prices, limit, n, self.cat.pop_order)
